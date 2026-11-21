@@ -1,10 +1,11 @@
 # Upstream repository & its virtualenv
 Irodori-TTS/
 
-# Large binaries, models, datasets, and training artifacts
+# Large binaries, models, datasets, references, and training artifacts
 models/
 datasets/
 outputs/
+references/
 
 # Audio & model weight files (safety net)
 *.wav

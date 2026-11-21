@@ -1,0 +1,3 @@
+[submodule "voice-caption-annotator"]
+	path = voice-caption-annotator
+	url = ./voice-caption-annotator
