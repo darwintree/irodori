@@ -11,6 +11,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
 import sqlite3
 import subprocess
 import sys

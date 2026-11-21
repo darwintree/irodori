@@ -60,12 +60,16 @@ def main() -> int:
             if not items:
                 continue
             all_synced = True
+            matched_in_db = 0
             for it in items:
                 vkey = derive_voice_key(str(it.get("source_audio_path") or ""))
-                if not vkey or db_stages.get(vkey) not in ALLOWED_DB_STAGES:
+                if not vkey or vkey not in db_stages:
+                    continue
+                matched_in_db += 1
+                if db_stages[vkey] not in ALLOWED_DB_STAGES:
                     all_synced = False
                     break
-            if not all_synced:
+            if matched_in_db == 0 or not all_synced:
                 skipped_unverified += 1
                 continue
 
