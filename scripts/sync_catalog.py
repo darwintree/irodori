@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS clips (
     raw_m4a_path TEXT NOT NULL,
     wav_path TEXT DEFAULT '',
     latent_path TEXT DEFAULT '',
+    num_frames INTEGER DEFAULT 0,
     duration REAL NOT NULL,
     emo_score INTEGER DEFAULT 0,
     char_anim1 TEXT DEFAULT '',
@@ -406,6 +407,10 @@ def main() -> int:
     args.db.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(args.db))
     conn.executescript(SCHEMA_SQL)
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(clips)").fetchall()}
+    if "num_frames" not in existing_cols:
+        conn.execute("ALTER TABLE clips ADD COLUMN num_frames INTEGER DEFAULT 0")
+        conn.commit()
 
     if not args.skip_mongo:
         n_ev = sync_mongo_events(conn, args.min_dur, args.max_dur)

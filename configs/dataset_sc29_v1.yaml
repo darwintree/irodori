@@ -40,8 +40,9 @@ speakers:
   - haruki
   - hazuki
 
-# Balance constraints: min/max >= 1/3 (hana=2163, hazuki 3x=2307, cap=6480 -> ratio=0.334)
+# Balance constraints: min/max >= 1/3 (hana/luca + P2, hazuki 3x)
 max_per_speaker: 6480
+min_max_ratio: 0.3334
 speaker_oversample:
   hazuki: 3
 

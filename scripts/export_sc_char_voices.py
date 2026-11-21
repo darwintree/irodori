@@ -59,8 +59,8 @@ def parse_mp4_duration(path: Path) -> float | None:
     return None
 
 
-def classify_voice(filename: str) -> tuple[str, str] | None:
-    """Return (priority, bucket_key) for P0+P1, or None if excluded/lower priority."""
+def classify_voice(filename: str, include_p2: bool = False) -> tuple[str, str] | None:
+    """Return (priority, bucket_key) for P0+P1 (and optional P2), or None if excluded/lower priority."""
     if re.search(r"(unison|birthday|prelude_voice)", filename, re.I):
         return None
     if re.search(r"casting_voice", filename, re.I):
@@ -83,6 +83,8 @@ def classify_voice(filename: str) -> tuple[str, str] | None:
         return ("P1", "idol_rank")
     if re.search(r"(audition|concert|live|encore|appeal|skill|link|memory|fes|judge)", filename, re.I):
         return ("P1", "live_skill")
+    if include_p2 and re.search(r"(official_sample_voice|^mypage_|excellent|good|normal|bad|failure|success|win|lose|clear|retry|cutin)", filename, re.I):
+        return ("P2", "mypage_or_result")
     return None
 
 
@@ -111,6 +113,7 @@ def main() -> int:
     parser.add_argument("--min-dur", type=float, default=2.0)
     parser.add_argument("--max-dur", type=float, default=15.0)
     parser.add_argument("--batch-size", type=int, default=20, help="Max clips per batch JSON")
+    parser.add_argument("--include-p2", action="store_true", help="Also include P2 buckets (mypage_or_result)")
     args = parser.parse_args()
 
     codes = resolve_codes(args.character)
@@ -129,7 +132,7 @@ def main() -> int:
 
         grouped: dict[str, list[tuple[str, Path, float, str]]] = defaultdict(list)
         for fp in sorted(cdir.glob("*.m4a")):
-            cls = classify_voice(fp.name)
+            cls = classify_voice(fp.name, include_p2=args.include_p2)
             if cls is None:
                 continue
             prio, bucket = cls

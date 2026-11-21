@@ -8,6 +8,7 @@ before wav/latent extraction.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import random
 import sqlite3
@@ -19,6 +20,19 @@ from typing import Any
 import yaml
 
 
+def _load_normalize_text():
+    norm_path = Path(__file__).resolve().parents[1] / "Irodori-TTS/irodori_tts/text_normalization.py"
+    spec = importlib.util.spec_from_file_location("irodori_text_normalization", norm_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load text_normalization from {norm_path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.normalize_text
+
+
+normalize_text = _load_normalize_text()
+
+
 def load_recipe(path: Path) -> dict[str, Any]:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
@@ -27,6 +41,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Build train/valid manifests from catalog.sqlite")
     parser.add_argument("--recipe", type=Path, required=True, help="Path to dataset YAML recipe")
     parser.add_argument("--plan-only", action="store_true", help="Compute stats & balance report without requiring latent_path")
+    parser.add_argument(
+        "--enforce-min-max-ratio",
+        type=float,
+        default=None,
+        help="Optional floor on min:max effective speaker ratio (overrides recipe min_max_ratio)",
+    )
     args = parser.parse_args()
 
     recipe = load_recipe(args.recipe)
@@ -43,6 +63,11 @@ def main() -> int:
     valid_ratio = float(recipe.get("valid_ratio", 0.02))
     min_valid = int(recipe.get("min_valid_per_speaker", 15))
     seed = int(recipe.get("seed", 42))
+    target_min_max_ratio = (
+        float(args.enforce_min_max_ratio)
+        if args.enforce_min_max_ratio is not None
+        else float(recipe.get("min_max_ratio", 0.0) or 0.0)
+    )
 
     if not db_path.is_file():
         print(f"[ERROR] Catalog DB not found: {db_path}", file=sys.stderr)
@@ -50,12 +75,14 @@ def main() -> int:
 
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(clips)").fetchall()}
+    nframes_expr = "COALESCE(num_frames, 0)" if "num_frames" in cols else "0"
     placeholders = ",".join("?" for _ in speakers)
     rows = conn.execute(
         f"""
         SELECT voice_key, speaker_id, source_type, category, duration,
                text_final, text_hash, emo_score, caption_ja, caption_stage,
-               raw_m4a_path, wav_path, latent_path
+               raw_m4a_path, wav_path, latent_path, {nframes_expr} AS num_frames
         FROM clips
         WHERE speaker_id IN ({placeholders})
           AND duration >= ? AND duration <= ?
@@ -67,20 +94,22 @@ def main() -> int:
     conn.close()
 
     by_sp: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    dropped_empty_norm = 0
     for r in rows:
         d = dict(r)
-        if not args.plan_only and not d.get("latent_path"):
+        if not args.plan_only and (not d.get("latent_path") or int(d.get("num_frames") or 0) <= 0):
             continue
+        norm_txt = normalize_text(d["text_final"]).strip()
+        if not norm_txt:
+            dropped_empty_norm += 1
+            continue
+        d["norm_text"] = norm_txt
         has_cap = (d.get("caption_stage") in valid_stages) and bool((d.get("caption_ja") or "").strip())
         d["has_cap"] = has_cap
         by_sp[d["speaker_id"]].append(d)
 
     rng = random.Random(seed)
-    train_rows: list[dict[str, Any]] = []
-    valid_rows: list[dict[str, Any]] = []
-    selected_keys: list[str] = []
-    per_speaker_stats: list[dict[str, Any]] = []
-
+    pools: dict[str, list[dict[str, Any]]] = {}
     for sp in speakers:
         pool = by_sp.get(sp, [])
         # Deduplicate by text_hash: prefer captioned > higher emo_score > longer duration
@@ -98,17 +127,43 @@ def main() -> int:
                         best_by_hash[h] = item
             pool = list(best_by_hash.values())
 
-        # Priority selection up to max_per_speaker:
-        # 1) All captioned clips, 2) High-emotion clips, 3) Stratified random sample of remaining
+        # Priority selection: 1) All captioned clips, 2) High-emotion clips, 3) Remaining clips
         captioned = [x for x in pool if x["has_cap"]]
         uncap_emo = [x for x in pool if not x["has_cap"] and (x["emo_score"] or 0) > 0]
         uncap_plain = [x for x in pool if not x["has_cap"] and (x["emo_score"] or 0) <= 0]
         rng.shuffle(captioned)
         rng.shuffle(uncap_emo)
         rng.shuffle(uncap_plain)
+        pools[sp] = captioned + uncap_emo + uncap_plain
 
-        ordered = captioned + uncap_emo + uncap_plain
-        kept = ordered[:max_per_speaker]
+    effective_cap = max_per_speaker
+    if target_min_max_ratio > 0.0:
+        eff_avail = [
+            len(pools[sp]) * int(speaker_oversample.get(sp, 1))
+            for sp in speakers
+            if pools[sp]
+        ]
+        if eff_avail:
+            min_avail = min(eff_avail)
+            allowed_max = int(min_avail / target_min_max_ratio)
+            if allowed_max < effective_cap:
+                print(
+                    f"[BALANCE] Lowering effective max_per_speaker {effective_cap} -> {allowed_max} "
+                    f"to guarantee min:max >= {target_min_max_ratio:.4f} (min_eff={min_avail})",
+                    flush=True,
+                )
+                effective_cap = max(1, allowed_max)
+
+    train_rows: list[dict[str, Any]] = []
+    valid_rows: list[dict[str, Any]] = []
+    selected_keys: list[str] = []
+    per_speaker_stats: list[dict[str, Any]] = []
+
+    for sp in speakers:
+        ordered = pools[sp]
+        sp_mult = int(speaker_oversample.get(sp, 1))
+        sp_cap = max(1, effective_cap // max(1, sp_mult))
+        kept = ordered[:sp_cap]
         for x in kept:
             selected_keys.append(x["voice_key"])
 
@@ -118,7 +173,6 @@ def main() -> int:
         val_set = kept[:n_val]
         trn_set = kept[n_val:]
 
-        sp_mult = int(speaker_oversample.get(sp, 1))
         sp_train_rows = 0
         sp_cap_train_rows = 0
         for x in trn_set:
@@ -126,7 +180,8 @@ def main() -> int:
             row = {
                 "voice_key": x["voice_key"],
                 "latent_path": x["latent_path"],
-                "text": x["text_final"],
+                "num_frames": int(x.get("num_frames") or 0),
+                "text": x["norm_text"],
                 "speaker_id": sp,
                 "caption": x["caption_ja"] if x["has_cap"] else "",
             }
@@ -140,14 +195,15 @@ def main() -> int:
             valid_rows.append({
                 "voice_key": x["voice_key"],
                 "latent_path": x["latent_path"],
-                "text": x["text_final"],
+                "num_frames": int(x.get("num_frames") or 0),
+                "text": x["norm_text"],
                 "speaker_id": sp,
                 "caption": x["caption_ja"] if x["has_cap"] else "",
             })
 
         per_speaker_stats.append({
             "speaker_id": sp,
-            "dedup_pool": len(pool),
+            "dedup_pool": len(ordered),
             "kept_unique": len(kept),
             "kept_captioned": sum(1 for x in kept if x["has_cap"]),
             "train_rows": sp_train_rows,
@@ -162,10 +218,18 @@ def main() -> int:
     max_eff = max(eff_counts) if eff_counts else 0
     ratio = round(min_eff / max_eff, 4) if max_eff else 0.0
     total_cap_rows = sum(s["train_cap_rows"] for s in per_speaker_stats)
+    if target_min_max_ratio > 0.0 and ratio < target_min_max_ratio:
+        print(
+            f"[WARN] Effective min/max ratio {ratio:.4f} is still below target {target_min_max_ratio:.4f}",
+            file=sys.stderr,
+        )
 
     summary = {
         "recipe": recipe["name"],
         "plan_only": args.plan_only,
+        "configured_max_per_speaker": max_per_speaker,
+        "effective_max_per_speaker": effective_cap,
+        "dropped_empty_norm": dropped_empty_norm,
         "num_speakers": len(non_zero),
         "total_kept_unique": sum(s["kept_unique"] for s in per_speaker_stats),
         "total_kept_captioned": sum(s["kept_captioned"] for s in per_speaker_stats),
