@@ -103,11 +103,14 @@ def convert_story(
 
         speaker = str(entry.get("speaker") or "ナレーション").strip()
         char_label = entry.get("charLabel")
-        speaker_id = (
-            str(char_label).strip().lower()
-            if isinstance(char_label, str) and char_label.strip()
-            else SPEAKER_TO_ID.get(speaker)
-        )
+        if speaker in SPEAKER_TO_ID:
+            speaker_id = SPEAKER_TO_ID[speaker]
+        elif speaker in {"プロデューサー", "ナレーション"}:
+            speaker_id = None
+        elif isinstance(char_label, str) and char_label.strip():
+            speaker_id = char_label.strip().lower()
+        else:
+            speaker_id = None
 
         cues: dict[str, str] = {}
         for src_k, dst_k in (("charAnim1", "anim1"), ("charAnim2", "expression"), ("charLipAnim", "lip")):
