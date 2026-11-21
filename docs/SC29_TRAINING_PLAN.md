@@ -37,16 +37,16 @@
 - [x] 提交 Phase 1 脚本与本计划文档至主仓库
 
 ### Phase 2：28 角色 7:3 分层剧情并发选话（真乃已完成）
-- [ ] Subagent Batch 1（`hiori`, `meguru`, `kogane`, `mamimi`, `sakuya`, `yuika`, `kiriko`）完成选话
-- [ ] Subagent Batch 2（`kaho`, `chiyoko`, `juri`, `rinze`, `natsuha`）完成选话
-- [ ] Subagent Batch 3（`amana`, `tenka`, `chiyuki`, `asahi`, `fuyuko`, `mei`）完成选话
-- [ ] Subagent Batch 4（`toru`, `madoka`, `koito`, `hinana`, `nichika`, `mikoto`）完成选话
-- [ ] Subagent Batch 5（`luca`, `hana`, `haruki`, `hazuki`）完成选话
-- [ ] 汇总校验并落盘 `datasets/selection_plan_sc29.json`
+- [x] Subagent Batch 1（`hiori`, `meguru`, `kogane`, `mamimi`, `sakuya`, `yuika`, `kiriko`）完成选话
+- [x] Subagent Batch 2（`kaho`, `chiyoko`, `juri`, `rinze`, `natsuha`）完成选话
+- [x] Subagent Batch 3（`amana`, `tenka`, `chiyuki`, `asahi`, `fuyuko`, `mei`）完成选话
+- [x] Subagent Batch 4（`toru`, `madoka`, `koito`, `hinana`, `nichika`, `mikoto`）完成选话
+- [x] Subagent Batch 5（`luca`, `hana`, `haruki`, `hazuki`）完成选话
+- [x] 汇总校验并落盘 `datasets/selection_plan_sc29.json`（28 角色 / 385 话 / 9,026 条，+ 真乃 710 = **9,736 条**）
 
 ### Phase 3：分波次 10 并发批量标注
-- [ ] **Wave A-0**：导出并预处理全部 28 位偶像 `characters/` P0+P1 批次包（`7,669` 条）
-- [ ] **Wave A-P0**：完成 P0 跨人设 `casting_voice` + 跨角色多人对话 `talking_multi` + 显式情绪词（`3,388` 条，三段式）
+- [x] **Wave A-0**：导出全部 28 位偶像 `characters/` P0+P1 批次包（`490` 批 / `7,669` 条），并完成 P0 全部 `208` 批预处理（0 失败）
+- [ ] **Wave A-P0**：完成 P0 跨人设 `casting_voice` + 跨角色多人对话 `talking_multi` + 显式情绪词（`209` 批 / `3,388` 条，三段式，**10 并发运行中**）
 - [ ] **Wave A-P1**：完成 P1 小游戏夸张情绪 + 互动反应 + Live/试镜 + 信赖度 + 评级梯度（`4,281` 条，三段式）
 - [ ] **Wave A 入库**：运行 `sync_catalog.py` 回写 SQLite 并确认 `min:max >= 1/3`
 - [ ] **Wave B-0**：按 `selection_plan_sc29.json` 导出并预处理其余 28 角色剧情批次包
@@ -108,3 +108,6 @@
 - **2026-11-21 23:19** — `voice-caption-annotator`（`3bac17d`）与主仓库（`a0bd05b`）完成干净提交；`agy` 10 并发压力测试 `10/10` 全部成功（总耗时 `11.7s`）。
 - **2026-11-21 23:22** — Phase 1 SQLite 主库 `datasets/catalog.sqlite` 初始化完成（`174,299` 剧情 + `8,052` 角色语音 + `746` 已复核标注）；Phase 2 5 路并行子代理选话与 Wave A `characters/` P0+P1 批次导出已同步启动。
 - **2026-11-21 23:25** — Wave A `characters/` P0+P1 全部导出完成（`490` 批次 / `7,669` 条）；创建总控计划文档 `docs/SC29_TRAINING_PLAN.md` 并提交 Phase 1。
+- **2026-11-21 23:26** — Wave A-P0 全部 `208/208` 批次预处理完成（0 失败），已以 `--workers 10` 启动三段式标注（`task-1455`）。
+- **2026-11-21 23:28** — Phase 2 全部 5 路子代理选话完成并经 SQLite 校验去重，落盘 `datasets/selection_plan_sc29.json`（其余 28 角色共 `385` 话 / `9,026` 条，高情绪占比严格控制在 `68%–78%`，加上真乃共 `9,736` 条剧情标注）。
+- **2026-11-21 23:39** — 冬优子双面人格触发词（方案 A：`猫かぶりな営業口調で、` / `素の本音口調で、` / `営業口調から素が漏れ出しながら、` + `persona:*`）已写入 `configs/speaker_caption_rules/fuyuko.md` 并注入全部 `018_fuyuko` 批次。Wave A-P0 首轮巡检：10 并发无报错，已完成 `13/208` 批 Pass 1（0 invalid，单批 `150s–303s`），3 批撞 `600s` 超时待末尾补跑。
