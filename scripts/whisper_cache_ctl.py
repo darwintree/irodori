@@ -107,6 +107,7 @@ def cmd_restore(args: argparse.Namespace) -> int:
     restored_items = 0
     non_empty_whisper = 0
     skipped_reviewed = 0
+    skipped_prepared = 0
     missing_items = 0
 
     for sid, item_map in sorted(cache_data.items()):
@@ -118,8 +119,12 @@ def cmd_restore(args: argparse.Namespace) -> int:
             continue
 
         data = json.loads(ann_path.read_text(encoding="utf-8"))
-        if data.get("stage") in SKIP_RESTORE_STAGES:
+        st = data.get("stage")
+        if st in SKIP_RESTORE_STAGES:
             skipped_reviewed += 1
+            continue
+        if st != "pass1_done" and not args.include_prepared:
+            skipped_prepared += 1
             continue
 
         changed = False
@@ -145,7 +150,7 @@ def cmd_restore(args: argparse.Namespace) -> int:
     print(
         f"restored_stories={restored_stories} restored_items={restored_items} "
         f"non_empty_whisper={non_empty_whisper} skipped_reviewed={skipped_reviewed} "
-        f"missing_items={missing_items}",
+        f"skipped_prepared={skipped_prepared} missing_items={missing_items}",
         flush=True,
     )
     return 0
@@ -160,10 +165,15 @@ def main() -> int:
     p_stash.add_argument("--cache", default=None, type=Path)
     p_stash.add_argument("--allow-empty", action="store_true")
 
-    p_restore = sub.add_parser("restore", help="Restore cached whisper_text into non-reviewed stories")
+    p_restore = sub.add_parser("restore", help="Restore cached whisper_text into pass1_done stories")
     p_restore.add_argument("--work-dir", required=True, type=Path)
     p_restore.add_argument("--cache", default=None, type=Path)
     p_restore.add_argument("--force", action="store_true")
+    p_restore.add_argument(
+        "--include-prepared",
+        action="store_true",
+        help="Also restore into stage==prepared stories (disabled by default to keep Pass 1 blind)",
+    )
 
     args = parser.parse_args()
     if args.subcommand == "stash":
