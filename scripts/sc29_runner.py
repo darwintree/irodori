@@ -128,6 +128,28 @@ def cmd_whisper_p1(args: argparse.Namespace) -> int:
         print(f"[WHISPER-P1] Work dir not found: {CHAR_WORK_DIR}", file=sys.stderr)
         return 1
 
+    env = os.environ.copy()
+    env["HF_HUB_OFFLINE"] = "1"
+
+    if args.benchmark:
+        cmd = [
+            sys.executable,
+            str(ROOT / "voice-caption-annotator/whisper_transcribe.py"),
+            "--work-dir",
+            str(CHAR_WORK_DIR),
+            "--whisper-python",
+            str(WHISPER_PY),
+            "--local-files-only",
+            "--batch-size",
+            str(args.batch_size),
+            "--benchmark-compare",
+            "--story",
+            "char_004_kogane_live_skill_01",
+            "--story",
+            "char_018_fuyuko_live_skill_01",
+        ]
+        return subprocess.run(cmd, env=env).returncode
+
     pending: list[Path] = []
     for d in sorted(CHAR_WORK_DIR.iterdir()):
         ann = d / "annotations.json"
@@ -141,8 +163,6 @@ def cmd_whisper_p1(args: argparse.Namespace) -> int:
     if not pending:
         return 0
 
-    env = os.environ.copy()
-    env["HF_HUB_OFFLINE"] = "1"
     cmd = [
         sys.executable,
         str(ROOT / "voice-caption-annotator/whisper_transcribe.py"),
@@ -151,7 +171,11 @@ def cmd_whisper_p1(args: argparse.Namespace) -> int:
         "--whisper-python",
         str(WHISPER_PY),
         "--local-files-only",
+        "--batch-size",
+        str(args.batch_size),
     ]
+    if args.force:
+        cmd.append("--force")
     for d in pending:
         cmd += ["--story", d.name]
 
@@ -160,6 +184,9 @@ def cmd_whisper_p1(args: argparse.Namespace) -> int:
         return rc
 
     if not args.no_stash:
+        cache_file = CHAR_WORK_DIR / ".whisper_cache_p1.json"
+        if args.force and cache_file.is_file():
+            cache_file.unlink()
         stash_cmd = [
             sys.executable,
             str(ROOT / "scripts/whisper_cache_ctl.py"),
@@ -294,6 +321,9 @@ def main() -> int:
 
     p_wh = sub.add_parser("whisper-p1", help="Pre-run local Whisper on prepared character batches and stash cache")
     p_wh.add_argument("--no-stash", action="store_true", help="Skip stashing whisper_text after transcription")
+    p_wh.add_argument("--batch-size", type=int, default=16, help="Clips per GPU batch")
+    p_wh.add_argument("--benchmark", action="store_true", help="Run read-only speed/accuracy benchmark")
+    p_wh.add_argument("--force", action="store_true", help="Force re-transcribing all prepared batches and overwrite cached whisper file")
 
     p_lat = sub.add_parser("extract-latents", help="Extract shared DACVAE latents into shared_latents/")
     p_lat.add_argument("--variant", choices=["lite", "full"], default="full")
