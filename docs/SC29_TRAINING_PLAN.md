@@ -51,7 +51,7 @@
 - [x] **Wave A-0**：导出全部 28 位偶像 `characters/` P0+P1 批次包（`490` 批 / `7,669` 条），并完成 P0 全部 `208` 批预处理（0 失败）
 - [x] **Wave A-P0**：完成 P0 跨人设 `casting_voice` + 跨角色多人对话 `talking_multi` + 显式情绪词（**`209/209` 批全部完成**，`3,387` reviewed + `1` rejected，`0` 失败，已同步 SQLite 并清理 `3.59 GiB` 中间 WAV）
 - [x] **Wave A-P1+P2 预处理与 Whisper 预跑**：完成 `289` 批预处理与 Batched GPU Whisper 全量重洗（`4,412/4,412` 条 `100%` 非空、`0.134s/条` 总计 `593.3s`、`0` 重复幻觉，提速 ~11×），并将碎片包合批重构为 `249` 批（`≤20 条 / ≤120s`，写入 `datasets/annotator_work/characters_p1/`、清理旧 `prepared` 目录、冬优子 `10/10` 批注规则、暂存 `.whisper_cache_p1.json` 保障 Pass 1 盲听）
-- [ ] **Wave A-P1+P2 LLM 标注入库**：完成 P1+P2 共 `249` 批 / `4,412` 条三段式标注（**`5` 批生产小验证已全数通过**，余 `244` 批 10 并发 Pass 1 运行中 → 瞬时回填 Whisper → Pass 2 双源仲裁），回写 SQLite 后清理已同步 WAV（与 GPU `v1_lite` 并行）
+- [x] **Wave A-P1+P2 LLM 标注入库**：完成 P1+P2 共 `249` 批 / `4,412` 条三段式标注（Pass 1 `88.9m`、`249/249` 成功 `0` 失败 → 瞬时回填 Whisper `4,412/4,412` 非空 → Pass 2 `34.7m`、`249/249` `reviewed` `0` 失败 `0` 警告；冬优子 P1 **`184/184 (100%)`** 命中方案 A），`sync_catalog.py` 同步 `updated=4,412` (`skipped=0`)，SQLite 总 `reviewed` 达 **`17,555`**（`character=7,799` + `event=9,756`；冬优子全库 `649/665 = 97.6%`），并清理全部 P1 中间 WAV（释放 **`4.06 GiB`**，`skipped_unsynced=0`）
 - [x] **Wave B-0**：按 `selection_plan_sc29.json` 导出并预处理其余 28 角色剧情批次包（`374/374` 包完成，`0` 失败，`400100103__hiori` 独立隔离，11 批含冬优子已注入规则）
 - [x] **Wave B-1～B-4**：10 并发全量跑完 28 角色 7:3 分层剧情 + 冬优子 `101800103` 按方案 A 重标（**`406/406` 话全部 `reviewed`**，`0` 错 `0` 警告；`3` 话游戏回忆重复 ID 已清理，冬优子 `12/12` 话 `336/336` 条 **100%** 命中方案 A）
 - [x] **Wave B 入库**：运行 `sync_catalog.py` 全部回写 `catalog.sqlite`（`event reviewed = 9,756`，`character reviewed = 3,387`），并清理已同步剧情 WAV（释放 `8.14 GiB`，当前 `614 GiB` 可用）
@@ -61,7 +61,7 @@
 - [ ] **`v2_full` 增量构建**：Wave A-P1+P2 入库后运行 `build_dataset.py --recipe configs/dataset_sc29_v1.yaml`（`min:max >= 1/3` 抬升上限），仅需 **~6 分钟增量补提 ~1.4 万条** 新增 `shared_latents/` 并生成最终 `datasets/sc29_v1/{train,valid}_manifest.jsonl`
 
 ### Phase 5：29 角色双版本全量微调（并行 `v1_lite` + `v2_full`）与三方评测
-- [ ] **`v1_lite` 并行微调**：在 Wave A-P1+P2 API 标注同时启动 `outputs/sc29_v1_lite/` 全量微调（采用 `configs/train_sc29_v1_lite.yaml`：`valid_every=500`、`max_steps=4000`、Muon，`bs=8, grad_accum=4, grad_ckpt=true`, `checkpoint_best_n=1`；不强求跑满，一旦 `v2_full` 数据就绪或 `val_loss` 趋稳即在最近最佳检查点后早停让路，力争今晚 ~20:30–21:00 完成 `v2_full`），导出 `v1_lite/model_best.safetensors` 并清理大 `.pt`
+- [x] **`v1_lite` 并行微调**：在 Wave A-P1+P2 API 标注期间运行至 `step=2,180+`，按 OR 早停策略于 `step=2,000` 最优检查点保存后收尾（`val_loss` 曲线：`0.769042` → `0.761237` → `0.753940` → **`0.752072`**），修复离线 tokenizer 导出并成功转换 `outputs/sc29_v1_lite/model_best.safetensors`（`2.85 GiB` / 714 张量），删除冗余 `.pt` 释放 **`13.8 GiB`**（磁盘 `615 GiB` 可用）
 - [ ] **`v2_full` 完整微调**：增量 latent 就绪后启动 `outputs/sc29_v1_full/` 完整版 10,000 步微调，导出 `v2_full/model_best.safetensors` 并清理大 `.pt`
 - [ ] **三方统一验收**：搭建多角色 + 冬优子双人格对比评估台，同批对比 **Base vs `v1_lite` vs `v2_full`**（ASR CER + 情绪/人格切换控制力 + 人工试听）
 
@@ -69,37 +69,37 @@
 
 ## 三、29 角色标注进度追踪表
 
-| # | 角色 | ID | `characters` P0+P1 | `events` 7:3 选话 | `events` 标注 | SQLite 同步 |
+| # | 角色 | ID | `characters` 标注 | `events` 7:3 选话 | `events` 标注 | SQLite 同步 |
 |---:|:---|:---|:---:|:---:|:---:|:---:|
-| 1 | 真乃 | `mano` | P0 已完 (`casting`+`multi`) / P1 Whisper 预跑中 | 已完成 (31话) | **709/709** | P0+剧情已同步 |
-| 2 | 灯織 | `hiori` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **333/333** | P0+剧情已同步 |
-| 3 | めぐる | `meguru` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **325/325** | P0+剧情已同步 |
-| 4 | 恋鐘 | `kogane` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **341/341** | P0+剧情已同步 |
-| 5 | 摩美々 | `mamimi` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **328/328** | P0+剧情已同步 |
-| 6 | 咲耶 | `sakuya` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **332/332** | P0+剧情已同步 |
-| 7 | 結華 | `yuika` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **328/328** | P0+剧情已同步 |
-| 8 | 霧子 | `kiriko` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **331/331** | P0+剧情已同步 |
-| 9 | 果穂 | `kaho` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **320/320** | P0+剧情已同步 |
-| 10 | 智代子 | `chiyoko` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **326/326** | P0+剧情已同步 |
-| 11 | 樹里 | `juri` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **329/329** | P0+剧情已同步 |
-| 12 | 凛世 | `rinze` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **349/349** | P0+剧情已同步 |
-| 13 | 夏葉 | `natsuha` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **303/303** | P0+剧情已同步 |
-| 14 | 甘奈 | `amana` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **344/344** | P0+剧情已同步 |
-| 15 | 甜花 | `tenka` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **328/328** | P0+剧情已同步 |
-| 16 | 千雪 | `chiyuki` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **337/337** | P0+剧情已同步 |
-| 17 | あさひ | `asahi` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **328/328** | P0+剧情已同步 |
-| 18 | 冬優子 | `fuyuko` | P0 已完(129条触发词) / P1 Whisper 预跑中 | 已完成 (12话) | **336/336 (100% 方案A)** | P0+剧情已同步 |
-| 19 | 愛依 | `mei` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **340/340** | P0+剧情已同步 |
-| 20 | 透 | `toru` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **344/344** | P0+剧情已同步 |
-| 21 | 円香 | `madoka` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **331/331** | P0+剧情已同步 |
-| 22 | 小糸 | `koito` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **335/335** | P0+剧情已同步 |
-| 23 | 雛菜 | `hinana` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **348/348** | P0+剧情已同步 |
-| 24 | にちか | `nichika` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **343/343** | P0+剧情已同步 |
-| 25 | 美琴 | `mikoto` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **324/324** | P0+剧情已同步 |
-| 26 | ルカ | `luca` | P0 已完 / P1+P2 Whisper 预跑中 | 已完成 | **306/306** | P0+剧情已同步 |
-| 27 | 羽那 | `hana` | P0 已完 / P1+P2 Whisper 预跑中 | 已完成 | **314/314** | P0+剧情已同步 |
-| 28 | はるき | `haruki` | P0 已完 / P1 Whisper 预跑中 | 已完成 | **329/329** | P0+剧情已同步 |
-| 29 | はづき | `hazuki` | 无 P0/P1 (3x 过采样) | 已完成 | **115/115** | 剧情已同步 |
+| 1 | 真乃 | `mano` | **285** (`P0+P1` 全部 `reviewed`) | 已完成 (31话) | **709** | 全部已同步 (`char 285 / ev 709`) |
+| 2 | 灯織 | `hiori` | **242** (`P0+P1` 全部 `reviewed`) | 已完成 | **333** | 全部已同步 (`char 242 / ev 333`) |
+| 3 | めぐる | `meguru` | **263** (`P0+P1` 全部 `reviewed`) | 已完成 | **325** | 全部已同步 (`char 263 / ev 325`) |
+| 4 | 恋鐘 | `kogane` | **314** (`P0+P1` 全部 `reviewed`) | 已完成 | **341** | 全部已同步 (`char 314 / ev 341`) |
+| 5 | 摩美々 | `mamimi` | **275** (`P0+P1` 全部 `reviewed`) | 已完成 | **328** | 全部已同步 (`char 275 / ev 328`) |
+| 6 | 咲耶 | `sakuya` | **268** (`P0+P1` 全部 `reviewed`) | 已完成 | **332** | 全部已同步 (`char 268 / ev 332`) |
+| 7 | 結華 | `yuika` | **273** (`P0+P1` 全部 `reviewed`) | 已完成 | **328** | 全部已同步 (`char 273 / ev 328`) |
+| 8 | 霧子 | `kiriko` | **287** (`P0+P1` 全部 `reviewed`) | 已完成 | **331** | 全部已同步 (`char 287 / ev 331`) |
+| 9 | 果穂 | `kaho` | **302** (`P0+P1` 全部 `reviewed`) | 已完成 | **320** | 全部已同步 (`char 302 / ev 320`) |
+| 10 | 智代子 | `chiyoko` | **294** (`P0+P1` 全部 `reviewed`) | 已完成 | **326** | 全部已同步 (`char 294 / ev 326`) |
+| 11 | 樹里 | `juri` | **287** (`P0+P1` 全部 `reviewed`) | 已完成 | **329** | 全部已同步 (`char 287 / ev 329`) |
+| 12 | 凛世 | `rinze` | **336** (`P0+P1` 全部 `reviewed`) | 已完成 | **349** | 全部已同步 (`char 336 / ev 349`) |
+| 13 | 夏葉 | `natsuha` | **298** (`P0+P1` 全部 `reviewed`) | 已完成 | **303** | 全部已同步 (`char 298 / ev 303`) |
+| 14 | 甘奈 | `amana` | **305** (`P0+P1` 全部 `reviewed`) | 已完成 | **344** | 全部已同步 (`char 305 / ev 344`) |
+| 15 | 甜花 | `tenka` | **289** (`P0+P1` 全部 `reviewed`) | 已完成 | **328** | 全部已同步 (`char 289 / ev 328`) |
+| 16 | 千雪 | `chiyuki` | **303** (`P0+P1` 全部 `reviewed`) | 已完成 | **337** | 全部已同步 (`char 303 / ev 337`) |
+| 17 | あさひ | `asahi` | **234** (`P0+P1` 全部 `reviewed`) | 已完成 | **328** | 全部已同步 (`char 234 / ev 328`) |
+| 18 | 冬優子 | `fuyuko` | **329** (`P0 129/145` + `P1 184/184` 方案A) | 已完成 (12话) | **336 (100% 方案A)** | 全部已同步 (`char 329 / ev 336`) |
+| 19 | 愛依 | `mei` | **290** (`P0+P1` 全部 `reviewed`) | 已完成 | **340** | 全部已同步 (`char 290 / ev 340`) |
+| 20 | 透 | `toru` | **257** (`P0+P1` 全部 `reviewed`) | 已完成 | **344** | 全部已同步 (`char 257 / ev 344`) |
+| 21 | 円香 | `madoka` | **177** (`P0+P1` 全部 `reviewed`) | 已完成 | **331** | 全部已同步 (`char 177 / ev 331`) |
+| 22 | 小糸 | `koito` | **259** (`P0+P1` 全部 `reviewed`) | 已完成 | **335** | 全部已同步 (`char 259 / ev 335`) |
+| 23 | 雛菜 | `hinana` | **276** (`P0+P1` 全部 `reviewed`) | 已完成 | **348** | 全部已同步 (`char 276 / ev 348`) |
+| 24 | にちか | `nichika` | **243** (`P0+P1` 全部 `reviewed`) | 已完成 | **343** | 全部已同步 (`char 243 / ev 343`) |
+| 25 | 美琴 | `mikoto` | **221** (`P0+P1` 全部 `reviewed`) | 已完成 | **324** | 全部已同步 (`char 221 / ev 324`) |
+| 26 | ルカ | `luca` | **306** (`P0+P1+P2` 全部 `reviewed`) | 已完成 | **306** | 全部已同步 (`char 306 / ev 306`) |
+| 27 | 羽那 | `hana` | **313** (`P0+P1+P2` 全部 `reviewed`) | 已完成 | **314** | 全部已同步 (`char 313 / ev 314`) |
+| 28 | はるき | `haruki` | **273** (`P0+P1` 全部 `reviewed`) | 已完成 | **329** | 全部已同步 (`char 273 / ev 329`) |
+| 29 | はづき | `hazuki` | 无 `P0/P1` (`3x` 过采样) | 已完成 | **115** | 全部已同步 (`ev 115`) |
 
 ---
 
@@ -119,3 +119,4 @@
 - **2026-11-22 12:28** — **Wave B 全量收官 & 优化 Pilot 落地**：Wave B 406/406 话全部 `reviewed`（清理 3 话共 4 条原作回忆重复 `id` 并 7 并发补完 Pass 2），`sync_catalog.py` 同步后 `event reviewed = 9,756`、`character reviewed = 3,387`，**冬优子全部 12/12 话（336/336 条）100% 命中方案 A 前缀与 `persona:*` 标签**；安全清理 375 话中间 WAV 释放 **`8.14 GiB`**（磁盘 `614 GiB` 可用）。`v1_lite` `--plan-only` 验证通过：`29` 角色 / `142,383` 唯一条 / `166,982` 训练行（`min/max = 1,923/5,767 = 0.3334+`，`cap_ratio=23.3%`）。完成 `pilot_p1_opt` 3 批对照验证：Pass 2 单条耗时 `-37.8%`（`9.20s → 5.72s/条`）、单听率 `-40%`（`59.5% → 36.0%`）、`context.md` `-89%`（`24.8KB → 2.1–3.1KB`）、`patch_annotations.py` 局部回写 `0` 错 `0` 警告；已将 `run.py` 断尾 401 自愈、`reviewer` 风险单听收紧、29 人精简声演速查卡与 `≤20 条 / ≤120s` 合批优化正式合入双仓库。
 - **2026-11-22 13:02** — **Batched Whisper 11× 提速 & 5 批生产小验证过关，GPU+API 双线全面开跑**：`whisper_transcribe.py` 升级为 GPU Batch=16 并消除多窗重复幻觉，在 **`593.3s`（`0.134s/条`，0 fallback）** 全洗 `289` 批 / `4,412` 条实现 **100.0% 非空、`0` 压缩比异常**；合批重构为 `249` 批写入 `datasets/annotator_work/characters_p1/` 并加固 `whisper_cache_ctl.py` 仅回填 `pass1_done` 批。`5` 批生产小验证（`fuyuko`、`hana P2`、`luca P2`、`kogane`、`nichika`，97 条）全数通过（Pass 1 均 **`99.8s`**、Pass 2 均 **`62.7s`**，整体 **`8.4s/条` = 3.0× 提速**、单听率 `39.2%`、`consensus 66.0%`、冬优子 `17/17` **100%** 达标且仅 `35.3%` 单听、自动捉出并修正 `hana` 10 条漂移）。现已同步启动 **RTX 4090 提取 `v1_lite` 142,351 条 latents（`~39.3 utt/s`，ETA ~54m）** 与 **Wave A-P1+P2 10 并发 Pass 1（余 244 批）**。
 - **2026-11-22 14:04** — **`v1_lite` 4090 开训 & 三方评测基建就绪**：4090 用时 **`56.8m`** 完成 `v1_lite` 全量 `142,343/142,351` 条 DACVAE latent 提取（仅 8 条过短/空音频跳过），生成正式清单（`29` 角色 / `142,375` 唯一条 / `166,966` 训练行 / `2,841` 验证行，`min/max=0.3334`）并修复 `sc29_runner.py verify-manifest` 语法通过加载校验；`v1_lite` Full FT（`task-2398`，`bs=8, grad_accum=4, grad_ckpt=true`）以 `~1.85s/step`、`16.5 GiB` VRAM 稳定推进至 `step=244+`（按“OR 早停”策略随 `v2_full` 就绪或 `val_loss` 趋稳切换）。同步落地并验证 [`scripts/eval_sc29.py`](file:///home/darwinwsl/code/irodori/scripts/eval_sc29.py) `--dry-run`（Base vs `v1_lite` vs `v2_full`，8 角色 0 泄漏 held-out 参考 + 33 项冬优子双人格/多情绪测试集）；`Wave A-P1+P2 Pass 1`（`task-2286`）已达 **`169/244`**（`0` 失败）。
+- **2026-11-22 15:12** — **Phase 3 100% 收官 & `v1_lite` → `v2_full` 顺利交接**：Wave A-P1+P2 Pass 1（`task-2286`，`88.9m`）与回填 Whisper 后 Pass 2（`task-2501`，`34.7m`）连续实现 **`249/249`（`4,412` 条）0 失败 0 警告通关**，冬优子 P1 **`184/184 (100.0%)`** 命中方案 A；`sync_catalog.py` 入库 **`4,412`** 条（全库 `reviewed = 17,555`，冬优子全库 `649/665 = 97.6%`）并清理 P1 中间 WAV 释放 **`4.06 GiB`**。`v1_lite`（`task-2398`）于 `step=2,000` 取得 `val_loss=0.752072` 收敛拐点后按 OR 策略停机让路，修复 `sc29_runner.py convert-best` 离线 tokenizer 导出并生成 `outputs/sc29_v1_lite/model_best.safetensors`（`2.85 GiB`），清理大 `.pt` 再省 `13.8 GiB`（剩余 **`615 GiB`**）；已锁定 `sc29_v1 --plan-only`（`29` 角色 / `154,244` 唯一 / **`17,408` 精标** / `187,214` 训练行 / `cap_ratio=27.7%` / `min_max=0.3334`），并于 4090 启动 **`v2_full` 增量 19,267 条 latent 提取**（复用 `134,977` 条，预计 ~7.5 分钟）。

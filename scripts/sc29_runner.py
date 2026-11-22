@@ -283,16 +283,22 @@ def cmd_convert_best(args: argparse.Namespace) -> int:
     if os.path.commonpath([str(out_path), str(out_dir_resolved)]) != str(out_dir_resolved):
         raise ValueError(f"--output must be inside {output_dir}: got {out_path}")
 
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tok_link = out_path.parent / "tokenizer"
+    if not tok_link.exists() and not tok_link.is_symlink():
+        tok_link.symlink_to(TOKENIZER_SRC)
+
     env = os.environ.copy()
     env["HF_HUB_OFFLINE"] = "1"
-    cmd = [
-        str(VENV_PY),
-        str(ROOT / "Irodori-TTS/convert_checkpoint_to_safetensors.py"),
-        str(in_path),
-        "--output",
-        str(out_path),
-        "--force",
-    ]
+    code = "\n".join([
+        "import sys",
+        f"sys.path.insert(0, {str(ROOT / 'Irodori-TTS')!r})",
+        "import convert_checkpoint_to_safetensors as c",
+        "c._export_tokenizer = lambda flat_config, output_path, *, source_checkpoint=None: (output_path.parent / 'tokenizer')",
+        f"sys.argv = ['convert_checkpoint_to_safetensors.py', {str(in_path)!r}, '--output', {str(out_path)!r}, '--force']",
+        "c.main()",
+    ])
+    cmd = [str(VENV_PY), "-c", code]
     return subprocess.run(cmd, env=env).returncode
 
 
