@@ -1,14 +1,20 @@
 # Irodori-TTS Workspace (Shiny Colors)
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/darwintree/irodori/blob/main/notebooks/colab_meanflow_setup.ipynb)
+
 Workspace for preparing Shiny Colors voice datasets, training, and evaluating [Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS) (`v4.1-Small`) on RTX 4090 (24 GB VRAM, WSL2).
 
 ## Directory Structure
 
 ### Tracked in Git
-- `configs/` — Training YAML configs (e.g. `train_mano_lora_baseline.yaml`).
-- `scripts/` — Data export and local monitoring/evaluation tools:
+- `configs/` — Training YAML configs (e.g. `train_mano_lora_baseline.yaml`, `train_sc29_meanflow_g4_colab.yaml`).
+- `notebooks/` — Colab setup notebooks:
+  - `colab_meanflow_setup.ipynb` — Mounts Drive, clones workspace + `Irodori-TTS` (`f01c08c`), runs `uv sync --extra cu128`, and unpacks the SC29 MeanFlow bundle.
+- `scripts/` — Data export, Colab packaging, and local monitoring/evaluation tools:
   - `prepare_mano_wavs.py` — Converts `.m4a` voice clips to 48 kHz mono PCM WAV with leading/trailing silence trimmed (`silenceremove`, keeping `0.15s` margin).
   - `monitor_server.py` — Lightweight HTTP dashboard (`:8765`) for loss curves and multi-sentence × multi-caption audio evaluation.
+  - `colab_prepare_meanflow.py` — Packs/unpacks SC29 MeanFlow assets and rewrites manifest paths for Colab.
+- `docs/COLAB_MEANFLOW_RUNBOOK.md` — Runbook for `agy cli` to execute MeanFlow distillation and Google Drive checkpoint backups in Colab.
 - `README.md`, `.gitignore`
 
 ### Ignored by Git (Local / Large Artifacts)

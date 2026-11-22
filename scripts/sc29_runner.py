@@ -331,6 +331,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
 
 def cmd_invert_speaker(args: argparse.Namespace) -> int:
     import re
+    import time
 
     ckpt_path = Path(args.checkpoint).expanduser().resolve()
     if not ckpt_path.is_file():
@@ -340,26 +341,33 @@ def cmd_invert_speaker(args: argparse.Namespace) -> int:
     if not SPEAKER_INV_CONFIG.is_file():
         raise FileNotFoundError(f"Speaker inversion config not found: {SPEAKER_INV_CONFIG}")
 
-    speakers = [str(s).strip() for s in args.speakers if str(s).strip()]
-    if not speakers:
-        raise ValueError("--speakers must specify at least one speaker ID")
+    requested_speakers = [str(s).strip() for s in (args.speakers or []) if str(s).strip()]
+    if args.all_speakers and requested_speakers:
+        raise ValueError("Specify either --speakers or --all-speakers, not both.")
+    if not args.all_speakers and not requested_speakers:
+        raise ValueError("Specify --speakers ... or --all-speakers.")
 
     out_root = Path(args.out_root).expanduser().resolve()
     out_root.mkdir(parents=True, exist_ok=True)
     manifests_root = ROOT / "datasets/sc29_v1_speakers"
     manifests_root.mkdir(parents=True, exist_ok=True)
 
-    rows_by_sp = {sp: [] for sp in speakers}
-    seen_keys = {sp: set() for sp in speakers}
-    target_set = set(speakers)
+    rows_by_sp = {}
+    seen_keys = {}
+    target_set = None if args.all_speakers else set(requested_speakers)
     with TRAIN_MANIFEST.open("r", encoding="utf-8") as f:
         for line in f:
             if not line.strip():
                 continue
             row = json.loads(line)
-            sp = str(row.get("speaker_id") or "")
-            if sp not in target_set:
+            sp = str(row.get("speaker_id") or "").strip()
+            if not sp:
                 continue
+            if target_set is not None and sp not in target_set:
+                continue
+            if sp not in rows_by_sp:
+                rows_by_sp[sp] = []
+                seen_keys[sp] = set()
             dedup_key = str(row.get("voice_key") or row.get("latent_path") or "")
             if dedup_key and dedup_key in seen_keys[sp]:
                 continue
@@ -367,23 +375,69 @@ def cmd_invert_speaker(args: argparse.Namespace) -> int:
                 seen_keys[sp].add(dedup_key)
             rows_by_sp[sp].append(line if line.endswith("\n") else line + "\n")
 
-    for sp in speakers:
-        if not rows_by_sp[sp]:
-            raise ValueError(f"Speaker {sp!r} has 0 rows in {TRAIN_MANIFEST}")
+    if args.all_speakers:
+        speakers = sorted(rows_by_sp.keys())
+        if not speakers:
+            raise ValueError(f"No speakers found in {TRAIN_MANIFEST}")
+    else:
+        speakers = requested_speakers
+        for sp in speakers:
+            if not rows_by_sp.get(sp):
+                raise ValueError(f"Speaker {sp!r} has 0 rows in {TRAIN_MANIFEST}")
 
     best_re = re.compile(
         r"^checkpoint_best_val_loss_(\d+)_([0-9]+(?:\.[0-9]+)?)\.speaker\.safetensors$"
     )
+    summary_path = out_root / "inversion_summary.json"
+    results_by_sp = {}
+    if args.skip_existing and summary_path.is_file():
+        try:
+            old_data = json.loads(summary_path.read_text(encoding="utf-8"))
+            for item in old_data.get("speakers", []):
+                if isinstance(item, dict) and item.get("speaker_id"):
+                    results_by_sp[str(item["speaker_id"])] = item
+        except Exception:
+            results_by_sp = {}
+
+    def _write_summary() -> None:
+        ordered = [results_by_sp[sp] for sp in speakers if sp in results_by_sp]
+        payload = {
+            "checkpoint": str(ckpt_path),
+            "out_root": str(out_root),
+            "max_steps": int(args.max_steps),
+            "total_speakers": len(speakers),
+            "completed_speakers": len(ordered),
+            "speakers": ordered,
+        }
+        summary_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
     env = os.environ.copy()
     env["IRODORI_SDPA_CUDNN"] = "0"
     env["HF_HUB_OFFLINE"] = "1"
 
     for idx, sp in enumerate(speakers, start=1):
+        dst = out_root / f"{sp}.speaker.safetensors"
+        if args.skip_existing and dst.is_file() and dst.stat().st_size >= 40000:
+            size_b = dst.stat().st_size
+            print(f"\n[INVERT {idx}/{len(speakers)}] speaker={sp} skipped (exists: {size_b} bytes)", flush=True)
+            if sp not in results_by_sp:
+                results_by_sp[sp] = {
+                    "speaker_id": sp,
+                    "status": "skipped_existing",
+                    "rows": len(rows_by_sp[sp]),
+                    "bytes": size_b,
+                    "output": str(dst),
+                }
+            _write_summary()
+            continue
+
         sp_manifest = manifests_root / sp / "train_manifest.jsonl"
         sp_manifest.parent.mkdir(parents=True, exist_ok=True)
         sp_manifest.write_text("".join(rows_by_sp[sp]), encoding="utf-8")
 
         sp_out_dir = out_root / sp
+        if sp_out_dir.exists():
+            shutil.rmtree(sp_out_dir)
         sp_out_dir.mkdir(parents=True, exist_ok=True)
         tok_link = sp_out_dir / "tokenizer"
         if not tok_link.exists() and not tok_link.is_symlink():
@@ -393,6 +447,7 @@ def cmd_invert_speaker(args: argparse.Namespace) -> int:
             f"\n[INVERT {idx}/{len(speakers)}] speaker={sp} rows={len(rows_by_sp[sp])} max_steps={args.max_steps}",
             flush=True,
         )
+        t0 = time.monotonic()
         cmd = [
             str(VENV_PY),
             str(ROOT / "Irodori-TTS/train.py"),
@@ -410,23 +465,43 @@ def cmd_invert_speaker(args: argparse.Namespace) -> int:
         rc = subprocess.run(cmd, env=env).returncode
         if rc != 0:
             return rc
+        elapsed_sec = round(time.monotonic() - t0, 2)
 
         best_candidates = []
         for p in sp_out_dir.glob("checkpoint_best_val_loss_*.speaker.safetensors"):
+            if not p.is_file() or p.stat().st_size < 40000:
+                continue
             m = best_re.match(p.name)
             if m:
                 best_candidates.append((float(m.group(2)), int(m.group(1)), p))
+        best_val_loss = None
+        best_step = None
         if best_candidates:
             best_candidates.sort(key=lambda item: (item[0], item[1]))
-            src = best_candidates[0][2]
+            best_val_loss, best_step, src = best_candidates[0]
         else:
             src = sp_out_dir / "checkpoint_final.speaker.safetensors"
-        if not src.is_file():
-            raise FileNotFoundError(f"Expected speaker inversion output not found in {sp_out_dir}")
+        if not src.is_file() or src.stat().st_size < 40000:
+            raise RuntimeError(f"Expected valid speaker inversion output (>=40000 bytes) not found in {sp_out_dir}: {src}")
 
-        dst = out_root / f"{sp}.speaker.safetensors"
         shutil.copy2(src, dst)
-        print(f"[INVERT] Saved {dst} ({dst.stat().st_size} bytes) from {src.name}", flush=True)
+        size_b = dst.stat().st_size
+        results_by_sp[sp] = {
+            "speaker_id": sp,
+            "status": "ok",
+            "rows": len(rows_by_sp[sp]),
+            "elapsed_sec": elapsed_sec,
+            "best_step": best_step,
+            "best_val_loss": best_val_loss,
+            "best_checkpoint": src.name,
+            "bytes": size_b,
+            "output": str(dst),
+        }
+        _write_summary()
+        print(
+            f"[INVERT] Saved {dst} ({size_b} bytes) from {src.name} in {elapsed_sec:.1f}s",
+            flush=True,
+        )
 
     return 0
 
@@ -562,7 +637,9 @@ def main() -> int:
     p_ev.add_argument("--serve-only", action="store_true")
 
     p_inv = sub.add_parser("invert-speaker", help="Train Speaker Inversion embeddings per character")
-    p_inv.add_argument("--speakers", nargs="+", required=True)
+    p_inv.add_argument("--speakers", nargs="+", default=None)
+    p_inv.add_argument("--all-speakers", action="store_true", help="Discover and run all speakers in train manifest")
+    p_inv.add_argument("--skip-existing", action="store_true", help="Skip speakers with existing valid .speaker.safetensors")
     p_inv.add_argument("--checkpoint", default=str(TRAIN_OUTPUT_DIR / "model_best.safetensors"))
     p_inv.add_argument("--out-root", default=str(ROOT / "outputs/sc29_v1_speakers"))
     p_inv.add_argument("--max-steps", type=int, default=1500)

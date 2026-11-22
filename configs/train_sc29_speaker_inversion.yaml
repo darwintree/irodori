@@ -50,12 +50,12 @@ train:
   speaker_inversion_init_embedding:
   batch_size: 16
   gradient_accumulation_steps: 1
-  num_workers: 8
-  dataloader_persistent_workers: true
+  num_workers: 0
+  dataloader_persistent_workers: false
   dataloader_prefetch_factor: 4
   allow_tf32: true
   compile_model: false
-  gradient_checkpointing: true
+  gradient_checkpointing: false
   precision: bf16
   optimizer: adamw
   learning_rate: 0.01
