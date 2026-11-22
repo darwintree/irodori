@@ -263,6 +263,49 @@ def resolve_valid_manifest(raw_path: Optional[Path]) -> Path:
     )
 
 
+def _pick_clips_for_speaker(
+    pool: Sequence[Dict[str, Any]],
+    max_clips: int,
+    min_clips: int,
+    target_total_frames: int,
+) -> List[Dict[str, Any]]:
+    preferred = [r for r in pool if 100 <= int(r.get("num_frames") or 0) <= 250]
+    others = [r for r in pool if not (100 <= int(r.get("num_frames") or 0) <= 250)]
+
+    def _sort_key(r: Dict[str, Any]) -> Tuple[int, int, str]:
+        has_cap = 1 if (r.get("caption") or "").strip() else 0
+        nf = int(r.get("num_frames") or 0)
+        dist = abs(nf - 150)
+        return (has_cap, dist, str(r.get("voice_key") or r.get("latent_path") or ""))
+
+    ordered = sorted(preferred, key=_sort_key) + sorted(others, key=_sort_key)
+    chosen: List[Dict[str, Any]] = []
+    total_nf = 0
+    for row in ordered:
+        if len(chosen) >= max_clips:
+            break
+        chosen.append(row)
+        total_nf += int(row.get("num_frames") or 0)
+        if len(chosen) >= min_clips and total_nf >= target_total_frames:
+            break
+    return chosen
+
+
+def _load_voice_keys(manifests: Sequence[Path]) -> set:
+    keys: set = set()
+    for tm in manifests:
+        if not tm.is_file():
+            continue
+        with tm.open("r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                vk = json.loads(line).get("voice_key")
+                if vk:
+                    keys.add(str(vk))
+    return keys
+
+
 def select_leak_free_refs(
     valid_manifest: Path,
     exclude_train_manifests: Sequence[Path],
@@ -270,24 +313,13 @@ def select_leak_free_refs(
     min_clips: int = 2,
     max_clips: int = 3,
     target_total_frames: int = 375,
-) -> Dict[str, List[Dict[str, Any]]]:
-    excluded_keys: set = set()
-    used_train_manifests: List[str] = []
-    for tm in exclude_train_manifests:
-        if tm.is_file():
-            used_train_manifests.append(str(tm))
-            with tm.open("r", encoding="utf-8") as f:
-                for line in f:
-                    if not line.strip():
-                        continue
-                    row = json.loads(line)
-                    vk = row.get("voice_key")
-                    if vk:
-                        excluded_keys.add(str(vk))
+) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, str]]:
+    primary_train = valid_manifest.parent / "train_manifest.jsonl"
+    primary_excluded = _load_voice_keys([primary_train])
+    all_excluded = primary_excluded | _load_voice_keys(exclude_train_manifests)
 
-    by_sp: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    skipped_overlap = 0
-    skipped_missing = 0
+    joint_by_sp: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    primary_by_sp: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     speaker_set = set(speakers)
     with valid_manifest.open("r", encoding="utf-8") as f:
         for line in f:
@@ -297,47 +329,41 @@ def select_leak_free_refs(
             sp = str(row.get("speaker_id") or "")
             if sp not in speaker_set:
                 continue
-            vk = str(row.get("voice_key") or "")
-            if vk and vk in excluded_keys:
-                skipped_overlap += 1
-                continue
             lp = Path(str(row.get("latent_path") or ""))
             if not lp.is_file():
-                skipped_missing += 1
                 continue
-            by_sp[sp].append(row)
+            vk = str(row.get("voice_key") or "")
+            if not vk or vk not in all_excluded:
+                joint_by_sp[sp].append(row)
+            if not vk or vk not in primary_excluded:
+                primary_by_sp[sp].append(row)
 
     selected: Dict[str, List[Dict[str, Any]]] = {}
+    modes: Dict[str, str] = {}
     for sp in speakers:
-        pool = by_sp.get(sp, [])
-        preferred = [r for r in pool if 100 <= int(r.get("num_frames") or 0) <= 250]
-        others = [r for r in pool if not (100 <= int(r.get("num_frames") or 0) <= 250)]
+        joint_chosen = _pick_clips_for_speaker(joint_by_sp.get(sp, []), max_clips, min_clips, target_total_frames)
+        if len(joint_chosen) >= min_clips:
+            selected[sp] = joint_chosen
+            modes[sp] = "joint_leak_free"
+            continue
 
-        def _sort_key(r: Dict[str, Any]) -> Tuple[int, int, str]:
-            has_cap = 1 if (r.get("caption") or "").strip() else 0
-            nf = int(r.get("num_frames") or 0)
-            dist = abs(nf - 150)
-            return (has_cap, dist, str(r.get("voice_key") or r.get("latent_path") or ""))
-
-        ordered = sorted(preferred, key=_sort_key) + sorted(others, key=_sort_key)
-        chosen: List[Dict[str, Any]] = []
-        total_nf = 0
-        for row in ordered:
-            if len(chosen) >= max_clips:
-                break
-            chosen.append(row)
-            total_nf += int(row.get("num_frames") or 0)
-            if len(chosen) >= min_clips and total_nf >= target_total_frames:
-                break
-
-        if len(chosen) < min_clips:
-            raise RuntimeError(
-                f"Speaker {sp!r} has only {len(chosen)} leak-free held-out ref clip(s) in {valid_manifest} "
-                f"(excluded {skipped_overlap} train overlaps across {len(used_train_manifests)} train manifests)."
+        primary_chosen = _pick_clips_for_speaker(primary_by_sp.get(sp, []), max_clips, min_clips, target_total_frames)
+        if len(primary_chosen) >= min_clips:
+            print(
+                f"[WARN] Speaker {sp!r} has only {len(joint_chosen)} joint leak-free ref(s); "
+                f"falling back to primary valid split ({len(primary_chosen)} clip(s) unseen by primary & Base).",
+                file=sys.stderr,
             )
-        selected[sp] = chosen
+            selected[sp] = primary_chosen
+            modes[sp] = "primary_valid_fallback"
+            continue
 
-    return selected
+        raise RuntimeError(
+            f"Speaker {sp!r} has only {len(primary_chosen)} held-out ref clip(s) even in {valid_manifest} "
+            f"(joint={len(joint_chosen)})."
+        )
+
+    return selected, modes
 
 
 def normalize_ja_for_cer(text: str) -> str:
@@ -637,6 +663,7 @@ def build_summary_and_html(
     specs: Sequence[ModelSpec],
     prompts: Sequence[EvalPrompt],
     selected_refs: Dict[str, List[Dict[str, Any]]],
+    ref_modes: Dict[str, str],
     ref_rel_paths: Dict[str, str],
     out_dir: Path,
     whisper_texts: Dict[Tuple[str, str], str],
@@ -721,6 +748,7 @@ def build_summary_and_html(
         "models": model_summaries,
         "references": {
             sp: {
+                "selection_mode": ref_modes.get(sp, "joint_leak_free"),
                 "ref_wav_rel": ref_rel_paths.get(sp, ""),
                 "total_frames": sum(int(r.get("num_frames") or 0) for r in rows),
                 "clips": [
@@ -945,14 +973,14 @@ def main() -> int:
     prompts = build_prompt_suite()
     valid_manifest = resolve_valid_manifest(args.valid_manifest)
     exclude_paths = list(DEFAULT_TRAIN_EXCLUDES) + [Path(p).expanduser() for p in args.exclude_train_manifest]
-    selected_refs = select_leak_free_refs(valid_manifest, exclude_paths, EVAL_SPEAKERS)
+    selected_refs, ref_modes = select_leak_free_refs(valid_manifest, exclude_paths, EVAL_SPEAKERS)
 
     print(f"[DRY-RUN CHECK] models={len(specs)}: {[f'{s.model_id}={s.checkpoint.name}' for s in specs]}")
     print(f"[DRY-RUN CHECK] valid_manifest={valid_manifest} | prompts={len(prompts)} (A={sum(1 for p in prompts if p.section=='A')}, B={sum(1 for p in prompts if p.section=='B')})")
     for sp in EVAL_SPEAKERS:
         clips = selected_refs[sp]
         frames = sum(int(r.get("num_frames") or 0) for r in clips)
-        print(f"  ref[{sp}]: {len(clips)} held-out clips ({frames} frames / {frames/25.0:.1f}s)")
+        print(f"  ref[{sp}] ({ref_modes[sp]}): {len(clips)} held-out clips ({frames} frames / {frames/25.0:.1f}s)")
 
     if args.dry_run:
         return 0
@@ -977,6 +1005,7 @@ def main() -> int:
         specs,
         prompts,
         selected_refs,
+        ref_modes,
         ref_rel_paths,
         args.out_dir,
         whisper_texts,
