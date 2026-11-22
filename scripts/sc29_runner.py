@@ -226,15 +226,18 @@ def cmd_verify_manifest(args: argparse.Namespace) -> int:
     valid_manifest = str(dataset_dir / "valid_manifest.jsonl")
     env = os.environ.copy()
     env["HF_HUB_OFFLINE"] = "1"
-    code = (
-        "import sys; sys.path.insert(0, '/home/darwinwsl/code/irodori/Irodori-TTS'); "
-        "from irodori_tts.dataset import LatentTextDataset; "
-        "ds = LatentTextDataset(sys.argv[1], latent_dim=32, max_latent_steps=500, enable_caption_condition=True, enable_speaker_condition=True, ref_min_frames=25, ref_max_frames=750); "
-        "vds = LatentTextDataset(sys.argv[2], latent_dim=32, max_latent_steps=500, enable_caption_condition=True, enable_speaker_condition=True, ref_min_frames=25, ref_max_frames=750); "
-        "print('train_len=', len(ds), 'valid_len=', len(vds), 'speakers=', len(ds.manifest_index.speakers)); "
-        "for i in range(min(5, len(ds))): s=ds[i]; assert s['latent'].ndim==2 and s['latent'].shape[1]==32 and s['num_frames']>0 and s['text']; "
-        "print('sample[0]=', ds[0]['latent'].shape, ds[0]['ref_latent'].shape, repr(ds[0]['caption'][:40]))"
-    )
+    code = "\n".join([
+        "import sys",
+        "sys.path.insert(0, '/home/darwinwsl/code/irodori/Irodori-TTS')",
+        "from irodori_tts.dataset import LatentTextDataset",
+        "ds = LatentTextDataset(sys.argv[1], latent_dim=32, max_latent_steps=500, enable_caption_condition=True, enable_speaker_condition=True, ref_min_frames=25, ref_max_frames=750)",
+        "vds = LatentTextDataset(sys.argv[2], latent_dim=32, max_latent_steps=500, enable_caption_condition=True, enable_speaker_condition=True, ref_min_frames=25, ref_max_frames=750)",
+        "print('train_len=', len(ds), 'valid_len=', len(vds), 'speakers=', len(ds.manifest_index.speakers))",
+        "for i in range(min(5, len(ds))):",
+        "    s = ds[i]",
+        "    assert s['latent'].ndim == 2 and s['latent'].shape[1] == 32 and s['num_frames'] > 0 and s['text']",
+        "print('sample[0]=', ds[0]['latent'].shape, ds[0]['ref_latent'].shape, repr(ds[0]['caption'][:40]))",
+    ])
     return subprocess.run([str(VENV_PY), "-c", code, train_manifest, valid_manifest], env=env).returncode
 
 
