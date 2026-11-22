@@ -33,6 +33,7 @@ TRAIN_MANIFEST = ROOT / "datasets/sc29_v1/train_manifest.jsonl"
 INIT_CKPT = ROOT / "models/Irodori-TTS-v4.1-Small/model.safetensors"
 TOKENIZER_SRC = ROOT / "models/Irodori-TTS-v4.1-Small/tokenizer"
 SPEAKER_INV_CONFIG = ROOT / "configs/train_sc29_speaker_inversion.yaml"
+MEANFLOW_4090_CONFIG = ROOT / "configs/train_sc29_meanflow_4090.yaml"
 
 
 def _variant_paths(variant: str) -> tuple[Path, Path]:
@@ -430,6 +431,95 @@ def cmd_invert_speaker(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bench_cpu(_: argparse.Namespace) -> int:
+    ckpt = TRAIN_OUTPUT_DIR / "model_best.safetensors"
+    embed = ROOT / "outputs/sc29_v1_speakers/fuyuko.speaker.safetensors"
+    if not ckpt.is_file():
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt}")
+    if not embed.is_file():
+        raise FileNotFoundError(f"Speaker embedding not found: {embed}")
+
+    env = os.environ.copy()
+    env["HF_HUB_OFFLINE"] = "1"
+    code = "\n".join([
+        "import sys, time, torch",
+        f"sys.path.insert(0, {str(ROOT / 'Irodori-TTS')!r})",
+        "from irodori_tts.inference_runtime import InferenceRuntime, RuntimeKey, SamplingRequest",
+        "print(f'[BENCH-CPU] torch_threads={torch.get_num_threads()} ckpt={sys.argv[1]}', flush=True)",
+        "t_load = time.perf_counter()",
+        "rt = InferenceRuntime.from_key(RuntimeKey(",
+        "    checkpoint=sys.argv[1],",
+        "    model_device='cpu',",
+        "    codec_repo='Aratako/Semantic-DACVAE-Japanese-32dim',",
+        "    model_precision='fp32',",
+        "    codec_device='cpu',",
+        "    codec_precision='fp32',",
+        "    compile_model=False,",
+        "))",
+        "print(f'[BENCH-CPU] load_sec={time.perf_counter() - t_load:.2f}s', flush=True)",
+        "rt.synthesize(SamplingRequest(text='こんにちは。', ref_embed=sys.argv[2], seconds=1.5, num_steps=2, cfg_scale=0.0, seed=42), log_fn=None)",
+        "text = 'プロデューサーさん、今日のお仕事もふゆにお任せくださいねっ！'",
+        "caption = '猫かぶりな営業口調で、甘く可愛らしい高い声で明るく話している。'",
+        "modes = [",
+        "    ('meanflow_4nfe_equiv', dict(num_steps=4, cfg_scale=0.0)),",
+        "    ('rf_sway8_joint', dict(num_steps=8, t_schedule_mode='sway', sway_coeff=-1.0, cfg_guidance_mode='joint', cfg_scale=3.0)),",
+        "    ('rf_40_indep', dict(num_steps=40, cfg_guidance_mode='independent', cfg_scale_text=3.0, cfg_scale_caption=3.0, cfg_scale_speaker=5.0)),",
+        "]",
+        "for name, kw in modes:",
+        "    req = SamplingRequest(text=text, caption=caption, ref_embed=sys.argv[2], seed=42, **kw)",
+        "    res = rt.synthesize(req, log_fn=None)",
+        "    audio_sec = float(res.audio.shape[-1]) / float(res.sample_rate)",
+        "    rtf = float(res.total_to_decode) / max(1e-6, audio_sec)",
+        "    stages = ', '.join(f'{k}={v * 1000.0:.1f}ms' for k, v in res.stage_timings)",
+        "    print(f'[BENCH-CPU] mode={name} audio_sec={audio_sec:.2f}s total={res.total_to_decode:.2f}s RTF={rtf:.2f}x | {stages}', flush=True)",
+    ])
+    return subprocess.run([str(VENV_PY), "-c", code, str(ckpt), str(embed)], env=env).returncode
+
+
+def cmd_probe_meanflow(args: argparse.Namespace) -> int:
+    if not MEANFLOW_4090_CONFIG.is_file():
+        raise FileNotFoundError(f"MeanFlow config not found: {MEANFLOW_4090_CONFIG}")
+    if not TRAIN_MANIFEST.is_file():
+        raise FileNotFoundError(f"Train manifest not found: {TRAIN_MANIFEST}")
+
+    probe_dir = Path("/tmp/sc29_meanflow_probe")
+    if probe_dir.exists():
+        shutil.rmtree(probe_dir, ignore_errors=True)
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    tok_link = probe_dir / "tokenizer"
+    tok_link.symlink_to(TOKENIZER_SRC)
+
+    env = os.environ.copy()
+    env["IRODORI_SDPA_CUDNN"] = "0"
+    env["HF_HUB_OFFLINE"] = "1"
+    cmd = [
+        str(VENV_PY),
+        str(ROOT / "Irodori-TTS/train.py"),
+        "--config",
+        str(MEANFLOW_4090_CONFIG),
+        "--manifest",
+        str(TRAIN_MANIFEST),
+        "--output-dir",
+        str(probe_dir),
+        "--max-steps",
+        str(int(args.steps)),
+        "--log-every",
+        "2",
+        "--save-every",
+        "999999",
+        "--checkpoint-best-n",
+        "0",
+        "--valid-ratio",
+        "0.0",
+        "--valid-every",
+        "0",
+    ]
+    try:
+        return subprocess.run(cmd, env=env).returncode
+    finally:
+        shutil.rmtree(probe_dir, ignore_errors=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Audited single-entrypoint runner for SC29 pipeline.")
     sub = parser.add_subparsers(dest="subcommand", required=True)
@@ -477,6 +567,11 @@ def main() -> int:
     p_inv.add_argument("--out-root", default=str(ROOT / "outputs/sc29_v1_speakers"))
     p_inv.add_argument("--max-steps", type=int, default=1500)
 
+    sub.add_parser("bench-cpu", help="Benchmark CPU-only fp32 synthesis latency with --ref-embed")
+
+    p_mf = sub.add_parser("probe-meanflow", help="Run a short MeanFlow distillation speed/VRAM probe on 4090")
+    p_mf.add_argument("--steps", type=int, default=6)
+
     args = parser.parse_args()
     dispatch = {
         "check": cmd_check,
@@ -488,6 +583,8 @@ def main() -> int:
         "convert-best": cmd_convert_best,
         "eval": cmd_eval,
         "invert-speaker": cmd_invert_speaker,
+        "bench-cpu": cmd_bench_cpu,
+        "probe-meanflow": cmd_probe_meanflow,
     }
     return dispatch[args.subcommand](args)
 
