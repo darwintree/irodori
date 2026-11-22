@@ -22,7 +22,7 @@
 
 ---
 
-## 2. Step 0：本机 WSL 一次性打包上传（29 角色 Inversion 完成后执行）
+## 2. Step 0：本机 WSL 一次性打包上传（不依赖全量 Inversion 完成）
 
 在本机 `/home/darwinwsl/code/irodori` 运行：
 
@@ -30,7 +30,7 @@
 python3 scripts/colab_prepare_meanflow.py pack
 ```
 
-产物默认输出到 `outputs/colab_meanflow_bundle/`（约 `5.8 GiB`，含 `model_s8000.safetensors`、`tokenizer.tar`、`shared_latents.tar`、`manifests/`、`speakers_s8000.tar`）。将其全部上传至 Google Drive 的 `MyDrive/irodori_sc29/bundle/`。
+默认启用 **`--split-mb 500`**（如需单文件可追加 `--split-mb 0`）：会将较大的 `model_s8000.safetensors` 与 `shared_latents.tar` 自动切分为每片 ≤ `500 MiB` 的 `.part000`、`.part001`… 分片，并生成包含全部文件校验和的 `SHA256SUMS`。产物输出到 `outputs/colab_meanflow_bundle/`（约 `5.5 GiB`），将其内部全部文件与 `manifests/` 目录上传至 Google Drive 的 `MyDrive/irodori_sc29/bundle/`（网页上传如某个分片失败只需重传该分片即可）。
 
 ---
 
@@ -61,11 +61,12 @@ python3 scripts/colab_prepare_meanflow.py unpack \
 ```
 
 脚本会自动：
-1. 复制 `model_s8000.safetensors` 到 `/content/sc29_work/teacher/model_s8000.safetensors`；
-2. 解包 `tokenizer.tar` 并在 `/content/sc29_work/outputs/sc29_v1_meanflow/tokenizer` 建立软链；
-3. 解包 `shared_latents.tar` 到 `/content/sc29_work/shared_latents/`；
-4. 生成 `/content/sc29_work/manifests/train_manifest_colab.jsonl` 并校验前 5 条 `latent_path` 存在；
-5. 解包 `speakers_s8000.tar` 到 `/content/sc29_work/speakers_s8000/`。
+1. 若存在 `SHA256SUMS`，先预检所有分片与文件是否齐全，并在流式读取时逐片校验 SHA256（缺片或损坏会立即报错指出文件名）；
+2. 将 `model_s8000.safetensors`（单文件或 `.part*` 自动拼接）写入 `/content/sc29_work/teacher/model_s8000.safetensors`；
+3. 流式解包 `tokenizer.tar` 并在 `/content/sc29_work/outputs/sc29_v1_meanflow/tokenizer` 建立软链；
+4. 将 `shared_latents.tar`（单文件或 `.part*` 边校验边流式解包，不占双倍临时空间）解压到 `/content/sc29_work/shared_latents/`；
+5. 生成 `/content/sc29_work/manifests/train_manifest_colab.jsonl` 并校验前 5 条 `latent_path` 存在；
+6. 解包 `speakers_s8000.tar` 到 `/content/sc29_work/speakers_s8000/`。
 
 ---
 
