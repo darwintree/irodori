@@ -1,6 +1,6 @@
 # 29-Character Shiny Colors Full Fine-Tuning config (10000 steps, Muon, RTX 4090 24GB).
 # Initialized from Aratako/Irodori-TTS-v4.1-Small.
-# Disk-aware checkpointing: save_every=5000, checkpoint_best_n=1 (~14-21 GB peak before safetensors export).
+# Checkpoint retention: save_every=5000, checkpoint_best_n=10 (keep checkpoints; ample disk space).
 
 model:
   latent_dim: 32
@@ -88,7 +88,7 @@ train:
   duration_huber_delta: 0.1
   log_every: 100
   save_every: 5000
-  checkpoint_best_n: 1
+  checkpoint_best_n: 10
   wandb_enabled: false
   wandb_project:
   wandb_entity:

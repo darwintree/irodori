@@ -145,6 +145,8 @@ class ModelSpec:
     model_id: str
     display_name: str
     checkpoint: Path
+    speaker_mode: str = "ref"  # "ref", "embed", or "noref"
+    embed_dir: Optional[Path] = None
 
 
 def build_prompt_suite() -> List[EvalPrompt]:
@@ -179,12 +181,32 @@ def build_prompt_suite() -> List[EvalPrompt]:
     return prompts
 
 
-def _parse_ckpt_spec(raw: str, default_label: Optional[str] = None) -> Tuple[Optional[str], Path]:
+def _parse_ckpt_spec(
+    raw: str, default_label: Optional[str] = None
+) -> Tuple[Optional[str], Path, str, Optional[Path]]:
+    label = default_label
+    rhs = raw
     if "=" in raw:
-        lhs, rhs = raw.split("=", 1)
-        if lhs.strip() and rhs.strip():
-            return lhs.strip(), Path(rhs.strip()).expanduser()
-    return default_label, Path(raw).expanduser()
+        lhs, rhs_part = raw.split("=", 1)
+        if lhs.strip() and rhs_part.strip():
+            label = lhs.strip()
+            rhs = rhs_part.strip()
+
+    speaker_mode = "ref"
+    embed_dir: Optional[Path] = None
+    path_str = rhs.strip()
+    if "@embed:" in path_str:
+        path_str, embed_dir_str = path_str.split("@embed:", 1)
+        speaker_mode = "embed"
+        embed_dir = Path(embed_dir_str.strip()).expanduser().resolve()
+    elif path_str.endswith("@noref"):
+        path_str = path_str[: -len("@noref")]
+        speaker_mode = "noref"
+    elif path_str.endswith("@ref"):
+        path_str = path_str[: -len("@ref")]
+        speaker_mode = "ref"
+
+    return label, Path(path_str.strip()).expanduser(), speaker_mode, embed_dir
 
 
 def _derive_model_id_and_name(label_hint: Optional[str], ckpt: Path, used_ids: set) -> Tuple[str, str]:
@@ -213,36 +235,55 @@ def _derive_model_id_and_name(label_hint: Optional[str], ckpt: Path, used_ids: s
 
 def resolve_model_specs(args: argparse.Namespace) -> List[ModelSpec]:
     specs: List[ModelSpec] = []
-    seen_paths: set = set()
+    seen_keys: set = set()
     used_ids: set = set()
 
-    def _add(label: Optional[str], path: Path, fallback_disp: Optional[str] = None) -> None:
+    def _add(
+        label: Optional[str],
+        path: Path,
+        speaker_mode: str = "ref",
+        embed_dir: Optional[Path] = None,
+        fallback_disp: Optional[str] = None,
+    ) -> None:
         resolved = path.resolve()
-        if resolved in seen_paths:
+        dedup_key = (resolved, speaker_mode, embed_dir)
+        if dedup_key in seen_keys:
             return
-        seen_paths.add(resolved)
+        if speaker_mode == "embed" and (embed_dir is None or not embed_dir.is_dir()):
+            raise FileNotFoundError(f"Speaker embedding directory not found: {embed_dir}")
+        seen_keys.add(dedup_key)
         mid, disp = _derive_model_id_and_name(label, path, used_ids)
         if fallback_disp and not label:
             disp = fallback_disp
-        specs.append(ModelSpec(model_id=mid, display_name=disp, checkpoint=resolved))
+        if speaker_mode != "ref" and not label:
+            disp = f"{disp} [{speaker_mode}]"
+        specs.append(
+            ModelSpec(
+                model_id=mid,
+                display_name=disp,
+                checkpoint=resolved,
+                speaker_mode=speaker_mode,
+                embed_dir=embed_dir,
+            )
+        )
 
     if args.base_checkpoint and str(args.base_checkpoint).lower() not in {"none", "off"}:
-        base_p = Path(args.base_checkpoint).expanduser()
+        lbl, base_p, sp_mode, emb_dir = _parse_ckpt_spec(str(args.base_checkpoint), default_label="base")
         if not base_p.is_file():
             raise FileNotFoundError(f"Base checkpoint not found: {base_p}")
-        _add("base", base_p, fallback_disp="Base Zero-Shot (v4.1-Small)")
+        _add(lbl, base_p, sp_mode, emb_dir, fallback_disp="Base Zero-Shot (v4.1-Small)")
 
     for raw_extra in args.extra_checkpoint:
-        lbl, p = _parse_ckpt_spec(raw_extra)
+        lbl, p, sp_mode, emb_dir = _parse_ckpt_spec(raw_extra)
         if not p.is_file():
             raise FileNotFoundError(f"Extra checkpoint not found: {p}")
-        _add(lbl, p)
+        _add(lbl, p, sp_mode, emb_dir)
 
     if args.checkpoint:
-        lbl, p = _parse_ckpt_spec(args.checkpoint)
+        lbl, p, sp_mode, emb_dir = _parse_ckpt_spec(args.checkpoint)
         if not p.is_file():
             raise FileNotFoundError(f"Primary checkpoint not found: {p}")
-        _add(lbl, p)
+        _add(lbl, p, sp_mode, emb_dir)
 
     if not specs:
         raise ValueError("No valid checkpoints configured for evaluation.")
@@ -626,16 +667,39 @@ def synthesize_all_models(
             if out_wav.is_file():
                 synth_times[(spec.model_id, pr.prompt_id)] = 0.0
                 continue
-            ref_latents = [str(r["latent_path"]) for r in selected_refs[pr.speaker_id]]
-            req = SamplingRequest(
-                text=pr.text,
-                caption=pr.caption,
-                ref_latents=ref_latents,
-                cfg_scale_text=3.0,
-                cfg_scale_caption=3.0,
-                cfg_scale_speaker=5.0,
-                seed=seed,
-            )
+            if spec.speaker_mode == "embed":
+                assert spec.embed_dir is not None
+                embed_file = spec.embed_dir / f"{pr.speaker_id}.speaker.safetensors"
+                req = SamplingRequest(
+                    text=pr.text,
+                    caption=pr.caption,
+                    ref_embed=str(embed_file),
+                    cfg_scale_text=3.0,
+                    cfg_scale_caption=3.0,
+                    cfg_scale_speaker=5.0,
+                    seed=seed,
+                )
+            elif spec.speaker_mode == "noref":
+                req = SamplingRequest(
+                    text=pr.text,
+                    caption=pr.caption,
+                    no_ref=True,
+                    cfg_scale_text=3.0,
+                    cfg_scale_caption=3.0,
+                    cfg_scale_speaker=0.0,
+                    seed=seed,
+                )
+            else:
+                ref_latents = [str(r["latent_path"]) for r in selected_refs[pr.speaker_id]]
+                req = SamplingRequest(
+                    text=pr.text,
+                    caption=pr.caption,
+                    ref_latents=ref_latents,
+                    cfg_scale_text=3.0,
+                    cfg_scale_caption=3.0,
+                    cfg_scale_speaker=5.0,
+                    seed=seed,
+                )
             t0 = time.monotonic()
             res = runtime.synthesize(req, log_fn=None)
             dt = time.monotonic() - t0
@@ -669,7 +733,13 @@ def build_summary_and_html(
     whisper_texts: Dict[Tuple[str, str], str],
     acoustics: Dict[Tuple[str, str], Dict[str, Optional[float]]],
     synth_times: Dict[Tuple[str, str], float],
+    active_speakers: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
+    speakers_list = (
+        list(active_speakers)
+        if active_speakers is not None
+        else [sp for sp in EVAL_SPEAKERS if sp in selected_refs]
+    )
     records_by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for spec in specs:
         for pr in prompts:
@@ -703,7 +773,7 @@ def build_summary_and_html(
         sec_a = [r for r in m_recs if r["section"] == "A"]
         sec_b = [r for r in m_recs if r["section"] == "B"]
         per_sp_cer: Dict[str, Optional[float]] = {}
-        for sp in EVAL_SPEAKERS:
+        for sp in speakers_list:
             sp_recs = [r for r in m_recs if r["speaker_id"] == sp]
             per_sp_cer[sp] = _mean_or_none([r["cer"] for r in sp_recs], digits=4)
 
@@ -733,6 +803,7 @@ def build_summary_and_html(
             {
                 "model_id": spec.model_id,
                 "display_name": spec.display_name,
+                "speaker_mode": spec.speaker_mode,
                 "checkpoint": str(spec.checkpoint),
                 "overall_cer": _mean_or_none([r["cer"] for r in m_recs], digits=4),
                 "section_a_cer": _mean_or_none([r["cer"] for r in sec_a], digits=4),
@@ -743,7 +814,7 @@ def build_summary_and_html(
         )
 
     summary = {
-        "eval_speakers": EVAL_SPEAKERS,
+        "eval_speakers": speakers_list,
         "num_prompts": len(prompts),
         "models": model_summaries,
         "references": {
@@ -838,7 +909,9 @@ def render_html_report(
         if p.section == "B":
             sec_b_by_sp[p.speaker_id].append(p)
 
-    for sp in EVAL_SPEAKERS:
+    for sp in summary["eval_speakers"]:
+        if not sec_b_by_sp.get(sp):
+            continue
         ref_info = summary["references"][sp]
         sp_header = (
             f"<tr class='sp-sep'><td colspan='{len(specs) + 1}'>"
@@ -960,6 +1033,7 @@ def main() -> int:
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--whisper-python", type=Path, default=DEFAULT_WHISPER_PY)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--speakers", default=None, help="Comma-separated subset of speakers to evaluate (e.g. fuyuko,mano,luca)")
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--serve-only", action="store_true", help="Serve existing out-dir HTML report without running synthesis/ASR")
     parser.add_argument("--dry-run", action="store_true", help="Validate refs, prompts, and checkpoints without GPU")
@@ -980,14 +1054,36 @@ def main() -> int:
         return 0
 
     specs = resolve_model_specs(args)
-    prompts = build_prompt_suite()
+    if args.speakers:
+        active_speakers = [s.strip() for s in args.speakers.split(",") if s.strip()]
+        unknown = [s for s in active_speakers if s not in EVAL_SPEAKERS]
+        if unknown:
+            raise ValueError(f"Unknown --speakers: {unknown}. Allowed: {EVAL_SPEAKERS}")
+    else:
+        active_speakers = list(EVAL_SPEAKERS)
+
+    active_set = set(active_speakers)
+    prompts = [p for p in build_prompt_suite() if p.speaker_id in active_set]
+    for s in specs:
+        if s.speaker_mode == "embed":
+            assert s.embed_dir is not None
+            missing = [
+                str(s.embed_dir / f"{sp}.speaker.safetensors")
+                for sp in active_speakers
+                if not (s.embed_dir / f"{sp}.speaker.safetensors").is_file()
+            ]
+            if missing:
+                raise FileNotFoundError(
+                    f"Missing speaker inversion embedding(s) for {s.model_id}: {missing}"
+                )
+
     valid_manifest = resolve_valid_manifest(args.valid_manifest)
     exclude_paths = list(DEFAULT_TRAIN_EXCLUDES) + [Path(p).expanduser() for p in args.exclude_train_manifest]
-    selected_refs, ref_modes = select_leak_free_refs(valid_manifest, exclude_paths, EVAL_SPEAKERS)
+    selected_refs, ref_modes = select_leak_free_refs(valid_manifest, exclude_paths, active_speakers)
 
-    print(f"[DRY-RUN CHECK] models={len(specs)}: {[f'{s.model_id}={s.checkpoint.name}' for s in specs]}")
-    print(f"[DRY-RUN CHECK] valid_manifest={valid_manifest} | prompts={len(prompts)} (A={sum(1 for p in prompts if p.section=='A')}, B={sum(1 for p in prompts if p.section=='B')})")
-    for sp in EVAL_SPEAKERS:
+    print(f"[DRY-RUN CHECK] models={len(specs)}: {[f'{s.model_id}({s.speaker_mode})={s.checkpoint.name}' for s in specs]}")
+    print(f"[DRY-RUN CHECK] valid_manifest={valid_manifest} | speakers={len(active_speakers)} | prompts={len(prompts)} (A={sum(1 for p in prompts if p.section=='A')}, B={sum(1 for p in prompts if p.section=='B')})")
+    for sp in active_speakers:
         clips = selected_refs[sp]
         frames = sum(int(r.get("num_frames") or 0) for r in clips)
         print(f"  ref[{sp}] ({ref_modes[sp]}): {len(clips)} held-out clips ({frames} frames / {frames/25.0:.1f}s)")
@@ -1021,6 +1117,7 @@ def main() -> int:
         whisper_texts,
         acoustics,
         synth_times,
+        active_speakers=active_speakers,
     )
     print("\n[EVAL DONE] Summary:")
     for ms in summary["models"]:

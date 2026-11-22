@@ -32,6 +32,7 @@ TRAIN_CONFIG_LITE = ROOT / "configs/train_sc29_v1_lite.yaml"
 TRAIN_MANIFEST = ROOT / "datasets/sc29_v1/train_manifest.jsonl"
 INIT_CKPT = ROOT / "models/Irodori-TTS-v4.1-Small/model.safetensors"
 TOKENIZER_SRC = ROOT / "models/Irodori-TTS-v4.1-Small/tokenizer"
+SPEAKER_INV_CONFIG = ROOT / "configs/train_sc29_speaker_inversion.yaml"
 
 
 def _variant_paths(variant: str) -> tuple[Path, Path]:
@@ -310,10 +311,14 @@ def cmd_eval(args: argparse.Namespace) -> int:
     env["IRODORI_SDPA_CUDNN"] = "0"
     env["HF_HUB_OFFLINE"] = "1"
     cmd = [str(VENV_PY), str(eval_py)]
+    if args.base_checkpoint:
+        cmd += ["--base-checkpoint", str(args.base_checkpoint)]
     if args.checkpoint:
         cmd += ["--checkpoint", str(args.checkpoint)]
     for cp in args.extra_checkpoint:
         cmd += ["--extra-checkpoint", str(cp)]
+    if args.speakers:
+        cmd += ["--speakers", str(args.speakers)]
     if args.out_dir:
         cmd += ["--out-dir", str(args.out_dir)]
     if args.port:
@@ -321,6 +326,108 @@ def cmd_eval(args: argparse.Namespace) -> int:
     if args.serve_only:
         cmd.append("--serve-only")
     return subprocess.run(cmd, env=env).returncode
+
+
+def cmd_invert_speaker(args: argparse.Namespace) -> int:
+    import re
+
+    ckpt_path = Path(args.checkpoint).expanduser().resolve()
+    if not ckpt_path.is_file():
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+    if not TRAIN_MANIFEST.is_file():
+        raise FileNotFoundError(f"Full train manifest not found: {TRAIN_MANIFEST}")
+    if not SPEAKER_INV_CONFIG.is_file():
+        raise FileNotFoundError(f"Speaker inversion config not found: {SPEAKER_INV_CONFIG}")
+
+    speakers = [str(s).strip() for s in args.speakers if str(s).strip()]
+    if not speakers:
+        raise ValueError("--speakers must specify at least one speaker ID")
+
+    out_root = Path(args.out_root).expanduser().resolve()
+    out_root.mkdir(parents=True, exist_ok=True)
+    manifests_root = ROOT / "datasets/sc29_v1_speakers"
+    manifests_root.mkdir(parents=True, exist_ok=True)
+
+    rows_by_sp = {sp: [] for sp in speakers}
+    seen_keys = {sp: set() for sp in speakers}
+    target_set = set(speakers)
+    with TRAIN_MANIFEST.open("r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            sp = str(row.get("speaker_id") or "")
+            if sp not in target_set:
+                continue
+            dedup_key = str(row.get("voice_key") or row.get("latent_path") or "")
+            if dedup_key and dedup_key in seen_keys[sp]:
+                continue
+            if dedup_key:
+                seen_keys[sp].add(dedup_key)
+            rows_by_sp[sp].append(line if line.endswith("\n") else line + "\n")
+
+    for sp in speakers:
+        if not rows_by_sp[sp]:
+            raise ValueError(f"Speaker {sp!r} has 0 rows in {TRAIN_MANIFEST}")
+
+    best_re = re.compile(
+        r"^checkpoint_best_val_loss_(\d+)_([0-9]+(?:\.[0-9]+)?)\.speaker\.safetensors$"
+    )
+    env = os.environ.copy()
+    env["IRODORI_SDPA_CUDNN"] = "0"
+    env["HF_HUB_OFFLINE"] = "1"
+
+    for idx, sp in enumerate(speakers, start=1):
+        sp_manifest = manifests_root / sp / "train_manifest.jsonl"
+        sp_manifest.parent.mkdir(parents=True, exist_ok=True)
+        sp_manifest.write_text("".join(rows_by_sp[sp]), encoding="utf-8")
+
+        sp_out_dir = out_root / sp
+        sp_out_dir.mkdir(parents=True, exist_ok=True)
+        tok_link = sp_out_dir / "tokenizer"
+        if not tok_link.exists() and not tok_link.is_symlink():
+            tok_link.symlink_to(TOKENIZER_SRC)
+
+        print(
+            f"\n[INVERT {idx}/{len(speakers)}] speaker={sp} rows={len(rows_by_sp[sp])} max_steps={args.max_steps}",
+            flush=True,
+        )
+        cmd = [
+            str(VENV_PY),
+            str(ROOT / "Irodori-TTS/train.py"),
+            "--config",
+            str(SPEAKER_INV_CONFIG),
+            "--manifest",
+            str(sp_manifest),
+            "--init-checkpoint",
+            str(ckpt_path),
+            "--output-dir",
+            str(sp_out_dir),
+            "--max-steps",
+            str(int(args.max_steps)),
+        ]
+        rc = subprocess.run(cmd, env=env).returncode
+        if rc != 0:
+            return rc
+
+        best_candidates = []
+        for p in sp_out_dir.glob("checkpoint_best_val_loss_*.speaker.safetensors"):
+            m = best_re.match(p.name)
+            if m:
+                best_candidates.append((float(m.group(2)), int(m.group(1)), p))
+        if best_candidates:
+            best_candidates.sort(key=lambda item: (item[0], item[1]))
+            src = best_candidates[0][2]
+        else:
+            src = sp_out_dir / "checkpoint_final.speaker.safetensors"
+        if not src.is_file():
+            raise FileNotFoundError(f"Expected speaker inversion output not found in {sp_out_dir}")
+
+        dst = out_root / f"{sp}.speaker.safetensors"
+        shutil.copy2(src, dst)
+        print(f"[INVERT] Saved {dst} ({dst.stat().st_size} bytes) from {src.name}", flush=True)
+
+    return 0
 
 
 def main() -> int:
@@ -356,11 +463,19 @@ def main() -> int:
     p_cvt.add_argument("--output", default=None)
 
     p_ev = sub.add_parser("eval", help="Run multi-character and Fuyuko dual-persona evaluation")
+    p_ev.add_argument("--base-checkpoint", default=None)
     p_ev.add_argument("--checkpoint", default=None)
     p_ev.add_argument("--extra-checkpoint", action="append", default=[])
+    p_ev.add_argument("--speakers", default=None)
     p_ev.add_argument("--out-dir", default=None)
     p_ev.add_argument("--port", type=int, default=None)
     p_ev.add_argument("--serve-only", action="store_true")
+
+    p_inv = sub.add_parser("invert-speaker", help="Train Speaker Inversion embeddings per character")
+    p_inv.add_argument("--speakers", nargs="+", required=True)
+    p_inv.add_argument("--checkpoint", default=str(TRAIN_OUTPUT_DIR / "model_best.safetensors"))
+    p_inv.add_argument("--out-root", default=str(ROOT / "outputs/sc29_v1_speakers"))
+    p_inv.add_argument("--max-steps", type=int, default=1500)
 
     args = parser.parse_args()
     dispatch = {
@@ -372,6 +487,7 @@ def main() -> int:
         "train": cmd_train,
         "convert-best": cmd_convert_best,
         "eval": cmd_eval,
+        "invert-speaker": cmd_invert_speaker,
     }
     return dispatch[args.subcommand](args)
 
