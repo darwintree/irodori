@@ -28,6 +28,7 @@ CHARS_PROFILE_DIR = ROOT / "references/eidolon-sc/characters/facts"
 
 TRAIN_OUTPUT_DIR = ROOT / "outputs/sc29_v1_full"
 TRAIN_CONFIG = ROOT / "configs/train_sc29_v1_full.yaml"
+TRAIN_CONFIG_LITE = ROOT / "configs/train_sc29_v1_lite.yaml"
 TRAIN_MANIFEST = ROOT / "datasets/sc29_v1/train_manifest.jsonl"
 INIT_CKPT = ROOT / "models/Irodori-TTS-v4.1-Small/model.safetensors"
 TOKENIZER_SRC = ROOT / "models/Irodori-TTS-v4.1-Small/tokenizer"
@@ -244,6 +245,7 @@ def cmd_train(args: argparse.Namespace) -> int:
     if not tok_link.exists() and not tok_link.is_symlink():
         tok_link.symlink_to(TOKENIZER_SRC)
 
+    train_cfg = TRAIN_CONFIG_LITE if (args.variant == "lite" and TRAIN_CONFIG_LITE.is_file()) else TRAIN_CONFIG
     env = os.environ.copy()
     env["IRODORI_SDPA_CUDNN"] = "0"
     env["HF_HUB_OFFLINE"] = "1"
@@ -251,7 +253,7 @@ def cmd_train(args: argparse.Namespace) -> int:
         str(VENV_PY),
         str(ROOT / "Irodori-TTS/train.py"),
         "--config",
-        str(TRAIN_CONFIG),
+        str(train_cfg),
         "--manifest",
         str(dataset_dir / "train_manifest.jsonl"),
         "--output-dir",

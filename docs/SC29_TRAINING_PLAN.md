@@ -61,7 +61,7 @@
 - [ ] **`v2_full` 增量构建**：Wave A-P1+P2 入库后运行 `build_dataset.py --recipe configs/dataset_sc29_v1.yaml`（`min:max >= 1/3` 抬升上限），仅需 **~6 分钟增量补提 ~1.4 万条** 新增 `shared_latents/` 并生成最终 `datasets/sc29_v1/{train,valid}_manifest.jsonl`
 
 ### Phase 5：29 角色双版本全量微调（并行 `v1_lite` + `v2_full`）与三方评测
-- [ ] **`v1_lite` 并行微调**：在 Wave A-P1+P2 API 标注同时启动 `outputs/sc29_v1_lite/` 全量微调（10,000 步 Muon, `bs=8, grad_accum=4, grad_ckpt=true`, `checkpoint_best_n=1`），导出 `v1_lite/model_best.safetensors` 并清理大 `.pt`
+- [ ] **`v1_lite` 并行微调**：在 Wave A-P1+P2 API 标注同时启动 `outputs/sc29_v1_lite/` 全量微调（采用 `configs/train_sc29_v1_lite.yaml`：`valid_every=500`、`max_steps=4000`、Muon，`bs=8, grad_accum=4, grad_ckpt=true`, `checkpoint_best_n=1`；不强求跑满，一旦 `v2_full` 数据就绪或 `val_loss` 趋稳即在最近最佳检查点后早停让路，力争今晚 ~20:30–21:00 完成 `v2_full`），导出 `v1_lite/model_best.safetensors` 并清理大 `.pt`
 - [ ] **`v2_full` 完整微调**：增量 latent 就绪后启动 `outputs/sc29_v1_full/` 完整版 10,000 步微调，导出 `v2_full/model_best.safetensors` 并清理大 `.pt`
 - [ ] **三方统一验收**：搭建多角色 + 冬优子双人格对比评估台，同批对比 **Base vs `v1_lite` vs `v2_full`**（ASR CER + 情绪/人格切换控制力 + 人工试听）
 
