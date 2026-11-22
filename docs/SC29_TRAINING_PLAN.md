@@ -14,6 +14,9 @@
   - **Wave A (`characters/` P0+P1，28 位偶像，7,669 条)**：走三段式流程 `Pass 1 (LLM low 听写+标) -> Whisper large-v3 (单次 GPU) -> Pass 2 (LLM medium 双源原文仲裁+复核)`。
   - **Wave B (`events/` 剧情分层 7:3，29 角色，~9,200 条)**：走二段式流程 `Pass 1 (LLM low) -> Pass 2 (LLM medium)`，70% 高情绪核心回 + 30% 平静/明朗日常回。
   - **并发能力**：已实测 `agy` **10/10 并发无报错**，批量标注采用 `--workers 10`。
+  - **并行加速与双版本消融（`v1_lite` vs `v2_full`）**：
+    - Wave B 跑批期间利用空闲 RTX 4090 提前准备并预跑 Wave A-P1+P2 的本地 Whisper large-v3；完成后用 `scripts/whisper_cache_ctl.py` 暂存到 `.whisper_cache_p1.json` 并清空 JSON 中的 `whisper_text`，保障 Pass 1 盲听独立性与 LLM 阶段 0% GPU 占用，Pass 1 完成后瞬时回填再跑 Pass 2。
+    - Wave A-P1+P2 LLM API 标注（0% GPU）与 GPU 训练彻底解耦：**`v1_lite`**（`Wave A-P0 + Wave B`，10,000 步，`configs/dataset_sc29_v1_lite.yaml` → `outputs/sc29_v1_lite/`）先于 4090 并行开训；待 Wave A-P1+P2 入库后仅需增量提取 ~1.4 万条新增 latents，再训 **`v2_full`**（`Wave A-P0+P1+P2 + Wave B`，10,000 步，`configs/dataset_sc29_v1.yaml` → `outputs/sc29_v1_full/`），最终执行 **Base vs `v1_lite` vs `v2_full`** 统一三方评测。
 - **数据管理底座**：
   - 主库：`datasets/catalog.sqlite`（由 `scripts/sync_catalog.py` 幂等同步）
   - 共享特征池：`datasets/shared_latents/`（由 `scripts/extract_shared_latents.py` 直接从原 `.m4a` 流式 `ffmpeg` 裁剪并提取 DACVAE `.pt`，跳过 ~75 GB 中间 WAV 落盘；Phase 3 每波入库后由 `scripts/prune_synced_wavs.py` 清理已同步中间 WAV 以节约空间）
@@ -47,20 +50,20 @@
 ### Phase 3：分波次 10 并发批量标注
 - [x] **Wave A-0**：导出全部 28 位偶像 `characters/` P0+P1 批次包（`490` 批 / `7,669` 条），并完成 P0 全部 `208` 批预处理（0 失败）
 - [x] **Wave A-P0**：完成 P0 跨人设 `casting_voice` + 跨角色多人对话 `talking_multi` + 显式情绪词（**`209/209` 批全部完成**，`3,387` reviewed + `1` rejected，`0` 失败，已同步 SQLite 并清理 `3.59 GiB` 中间 WAV）
-- [ ] **Wave A-P1**：完成 P1 小游戏夸张情绪 + 互动反应 + Live/试镜 + 信赖度 + 评级梯度 + `hana/luca` P2（`289` 批 / `4,412` 条，三段式，排在 Wave B 之后）
-- [ ] **Wave A 入库**：运行 `sync_catalog.py` 回写 SQLite 并确认 `min:max >= 1/3`（入库后清理已同步 WAV）
+- [ ] **Wave A-P1+P2 预处理与 Whisper 预跑**：利用 Wave B 期间空闲 4090 完成 `289` 批预处理、冬优子规则注入、本地 Whisper large-v3 预跑并暂存至 `.whisper_cache_p1.json`（保障 Pass 1 盲听独立性与 LLM 阶段 0% GPU 占用）
+- [ ] **Wave A-P1+P2 LLM 标注入库**：完成 P1 小游戏夸张情绪 + 互动反应 + Live/试镜 + 信赖度 + 评级梯度 + `hana/luca` P2（`289` 批 / `4,412` 条，Pass 1 盲听 → 瞬时回填 Whisper → Pass 2 双源仲裁），回写 SQLite 后清理已同步 WAV（与 GPU 训练 `v1_lite` 并行）
 - [x] **Wave B-0**：按 `selection_plan_sc29.json` 导出并预处理其余 28 角色剧情批次包（`374/374` 包完成，`0` 失败，`400100103__hiori` 独立隔离，11 批含冬优子已注入规则）
 - [ ] **Wave B-1～B-4**：10 并发全量跑完 28 角色 7:3 分层剧情 + 冬优子 `101800103` 按方案 A 重标（**`375` 话 / `9,072` 条，二段式运行中**）
-- [ ] **Wave B 入库**：运行 `sync_catalog.py` 全部回写 SQLite，核验 0 错率与总有标占比
+- [ ] **Wave B 入库**：运行 `sync_catalog.py` 全部回写 SQLite，清理已同步剧情 WAV，核验 0 错率与总有标占比
 
-### Phase 4：全团共享 DACVAE Latent 提取与数据集构建
-- [ ] 运行 `build_dataset.py --plan-only` 锁定 `selected_voice_keys.txt`（~13.6–15.4 万条，强制 `min:max >= 1/3`）
-- [ ] 运行 `scripts/extract_shared_latents.py` 直接从 `.m4a` 流式裁剪静音并在 RTX 4090 提取 `Semantic-DACVAE-Japanese-32dim` latents → `datasets/shared_latents/`（~3.3 GB，跳过中间 WAV 落盘）并回写 SQLite `num_frames`
-- [ ] 运行 `build_dataset.py` 生成最终 `datasets/sc29_v1/{train,valid}_manifest.jsonl` 与 `stats.json`
+### Phase 4：全团共享 DACVAE Latent 提取与双版本清单构建（`v1_lite` → `v2_full` 增量复用）
+- [ ] **`v1_lite` 底座构建**：Wave B 入库后运行 `build_dataset.py --recipe configs/dataset_sc29_v1_lite.yaml` 锁定底座清单，RTX 4090 直提 `~13.6 万` 条 `shared_latents/`（跳过中间 WAV 落盘）并校验 `LatentTextDataset`
+- [ ] **`v2_full` 增量构建**：Wave A-P1+P2 入库后运行 `build_dataset.py --recipe configs/dataset_sc29_v1.yaml`（`min:max >= 1/3` 抬升上限），仅需 **~6 分钟增量补提 ~1.4 万条** 新增 `shared_latents/` 并生成最终 `datasets/sc29_v1/{train,valid}_manifest.jsonl`
 
-### Phase 5：29 角色全量微调与多角色验证
-- [ ] 配置 29 角色全量微调 YAML（Muon, `bs=8, grad_accum=4, grad_ckpt=true`, `checkpoint_best_n=1` 控制占用）并启动训练
-- [ ] 导出最优 `model_best.safetensors`、清理冗余 `.pt` 优化器状态并搭建多角色对比评估台验收
+### Phase 5：29 角色双版本全量微调（并行 `v1_lite` + `v2_full`）与三方评测
+- [ ] **`v1_lite` 并行微调**：在 Wave A-P1+P2 API 标注同时启动 `outputs/sc29_v1_lite/` 全量微调（10,000 步 Muon, `bs=8, grad_accum=4, grad_ckpt=true`, `checkpoint_best_n=1`），导出 `v1_lite/model_best.safetensors` 并清理大 `.pt`
+- [ ] **`v2_full` 完整微调**：增量 latent 就绪后启动 `outputs/sc29_v1_full/` 完整版 10,000 步微调，导出 `v2_full/model_best.safetensors` 并清理大 `.pt`
+- [ ] **三方统一验收**：搭建多角色 + 冬优子双人格对比评估台，同批对比 **Base vs `v1_lite` vs `v2_full`**（ASR CER + 情绪/人格切换控制力 + 人工试听）
 
 ---
 
@@ -112,3 +115,4 @@
 - **2026-11-21 23:39** — 冬优子双面人格触发词（方案 A：`猫かぶりな営業口調で、` / `素の本音口調で、` / `営業口調から素が漏れ出しながら、` + `persona:*`）已写入 `configs/speaker_caption_rules/fuyuko.md` 并注入全部 `018_fuyuko` 批次。Wave A-P0 首轮巡检：10 并发无报错，已完成 `13/208` 批 Pass 1（0 invalid，单批 `150s–303s`），3 批撞 `600s` 超时待末尾补跑。
 - **2026-11-22 00:05** — **Wave B-0 完成 & 磁盘瘦身**：修复 `selection_plan_sc29.json` 中 `luca` 缺失编号 `302600302 -> 102600302`（23 条日常冷静回，修正后全团计划剧情总计 `9,759` 条），`prepare_wave_b.py` 并发完成全部 `374/374` 新剧情包导出与预处理（`0` 失败，`400100103__hiori` 隔离保护真乃已复核条目，11 个含冬优子的剧情包均已注入方案 A 规则）。清理 `mano_full_*` 冗余 `.pt` 检查点与陈旧 `voice-caption-annotator/work` WAV，建立 Phase 3 分波次入库后清理已同步中间 WAV 与 Phase 4 直接管道提取 `.pt` 的磁盘节约策略。
 - **2026-11-22 07:38** — **Wave A-P0 全部收官 & Wave B 启动**：`task-1733` 将遗留 8 个超时批全部补跑通过（总计 `209/209` `reviewed`，`0` 失败），入库 `catalog.sqlite` 后 `character reviewed = 3,387`（冬优子 `145` 条中 `129` 条严格命中方案 A 触发词，余为戏中戏 `casting` / 幼年变声角色台词），并安全清理全部 P0 中间 WAV（累计省 `3.59 GiB`，当前 `610 GiB Avail`）。重置冬优子 `101800103` 按方案 A 重跑，已于 10 并发启动全部 `375` 话 Wave B 二段式标注。
+- **2026-11-22 11:10** — **启用并行 GPU/API 双版本路线（`v1_lite` + `v2_full`）**：更新总控脚本 `scripts/sc29_runner.py` 与 `scripts/whisper_cache_ctl.py`，趁 Wave B（已过 `76%`）期间 4090 空闲立即启动 Wave A-P1+P2 `289` 批预处理与本地 Whisper 预跑，并暂存至 `.whisper_cache_p1.json` 保障 Pass 1 盲听独立；后续 Wave B 入库后在 4090 并行开训 `v1_lite`（10,000 步）同时跑 Wave A-P1+P2 API 标注，最终增量提特征完成 `v2_full` 并三方评测（Base vs `v1_lite` vs `v2_full`）。

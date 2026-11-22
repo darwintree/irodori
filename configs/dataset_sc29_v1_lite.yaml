@@ -1,0 +1,58 @@
+# Declarative dataset recipe for Shiny Colors 29-character Irodori-TTS v1_lite training (Wave A-P0 + Wave B)
+name: sc29_v1_lite
+catalog_db: /home/darwinwsl/code/irodori/datasets/catalog.sqlite
+output_dir: /home/darwinwsl/code/irodori/datasets/sc29_v1_lite
+
+# Duration & deduplication
+min_duration: 2.0
+max_duration: 15.0
+dedup_by_text: true
+
+# All 28 idols + Hazuki (29 total)
+speakers:
+  - mano
+  - hiori
+  - meguru
+  - kogane
+  - mamimi
+  - sakuya
+  - yuika
+  - kiriko
+  - kaho
+  - chiyoko
+  - juri
+  - rinze
+  - natsuha
+  - amana
+  - tenka
+  - chiyuki
+  - asahi
+  - fuyuko
+  - mei
+  - toru
+  - madoka
+  - koito
+  - hinana
+  - nichika
+  - mikoto
+  - luca
+  - hana
+  - haruki
+  - hazuki
+
+# Balance constraints: min/max >= 1/3 (hazuki 3x)
+max_per_speaker: 6480
+min_max_ratio: 0.3334
+speaker_oversample:
+  hazuki: 3
+
+# Caption oversampling
+caption_oversample: 3
+include_caption_stages:
+  - reviewed
+  - human_approved
+
+# Validation split (stratified per speaker, never oversampled)
+valid_ratio: 0.02
+min_valid_per_speaker: 15
+seed: 42

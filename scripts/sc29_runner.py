@@ -7,6 +7,7 @@ Only permits hardcoded, audited subcommands via subprocess(..., shell=False) or 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -30,6 +31,12 @@ TRAIN_CONFIG = ROOT / "configs/train_sc29_v1_full.yaml"
 TRAIN_MANIFEST = ROOT / "datasets/sc29_v1/train_manifest.jsonl"
 INIT_CKPT = ROOT / "models/Irodori-TTS-v4.1-Small/model.safetensors"
 TOKENIZER_SRC = ROOT / "models/Irodori-TTS-v4.1-Small/tokenizer"
+
+
+def _variant_paths(variant: str) -> tuple[Path, Path]:
+    if variant == "lite":
+        return ROOT / "datasets/sc29_v1_lite", ROOT / "outputs/sc29_v1_lite"
+    return ROOT / "datasets/sc29_v1", ROOT / "outputs/sc29_v1_full"
 
 
 def cmd_check(_: argparse.Namespace) -> int:
@@ -116,14 +123,63 @@ def cmd_prepare_p1(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_whisper_p1(args: argparse.Namespace) -> int:
+    if not CHAR_WORK_DIR.is_dir():
+        print(f"[WHISPER-P1] Work dir not found: {CHAR_WORK_DIR}", file=sys.stderr)
+        return 1
+
+    pending: list[Path] = []
+    for d in sorted(CHAR_WORK_DIR.iterdir()):
+        ann = d / "annotations.json"
+        if not d.is_dir() or not ann.is_file():
+            continue
+        data = json.loads(ann.read_text(encoding="utf-8"))
+        if data.get("stage") == "prepared":
+            pending.append(d)
+
+    print(f"[WHISPER-P1] pending prepared batches={len(pending)}", flush=True)
+    if not pending:
+        return 0
+
+    env = os.environ.copy()
+    env["HF_HUB_OFFLINE"] = "1"
+    cmd = [
+        sys.executable,
+        str(ROOT / "voice-caption-annotator/whisper_transcribe.py"),
+        "--work-dir",
+        str(CHAR_WORK_DIR),
+        "--whisper-python",
+        str(WHISPER_PY),
+        "--local-files-only",
+    ]
+    for d in pending:
+        cmd += ["--story", d.name]
+
+    rc = subprocess.run(cmd, env=env).returncode
+    if rc != 0:
+        return rc
+
+    if not args.no_stash:
+        stash_cmd = [
+            sys.executable,
+            str(ROOT / "scripts/whisper_cache_ctl.py"),
+            "stash",
+            "--work-dir",
+            str(CHAR_WORK_DIR),
+        ]
+        return subprocess.run(stash_cmd).returncode
+    return 0
+
+
 def cmd_extract_latents(args: argparse.Namespace) -> int:
+    dataset_dir, _ = _variant_paths(args.variant)
     env = os.environ.copy()
     env["HF_HUB_OFFLINE"] = "1"
     cmd = [
         str(VENV_PY),
         str(ROOT / "scripts/extract_shared_latents.py"),
         "--keys",
-        str(ROOT / "datasets/sc29_v1/selected_voice_keys.txt"),
+        str(dataset_dir / "selected_voice_keys.txt"),
         "--db",
         str(ROOT / "datasets/catalog.sqlite"),
         "--out-dir",
@@ -136,24 +192,28 @@ def cmd_extract_latents(args: argparse.Namespace) -> int:
     return subprocess.run(cmd, env=env).returncode
 
 
-def cmd_verify_manifest(_: argparse.Namespace) -> int:
+def cmd_verify_manifest(args: argparse.Namespace) -> int:
+    dataset_dir, _ = _variant_paths(args.variant)
+    train_manifest = str(dataset_dir / "train_manifest.jsonl")
+    valid_manifest = str(dataset_dir / "valid_manifest.jsonl")
     env = os.environ.copy()
     env["HF_HUB_OFFLINE"] = "1"
     code = (
         "import sys; sys.path.insert(0, '/home/darwinwsl/code/irodori/Irodori-TTS'); "
         "from irodori_tts.dataset import LatentTextDataset; "
-        "ds = LatentTextDataset('/home/darwinwsl/code/irodori/datasets/sc29_v1/train_manifest.jsonl', latent_dim=32, max_latent_steps=500, enable_caption_condition=True, enable_speaker_condition=True, ref_min_frames=25, ref_max_frames=750); "
-        "vds = LatentTextDataset('/home/darwinwsl/code/irodori/datasets/sc29_v1/valid_manifest.jsonl', latent_dim=32, max_latent_steps=500, enable_caption_condition=True, enable_speaker_condition=True, ref_min_frames=25, ref_max_frames=750); "
+        "ds = LatentTextDataset(sys.argv[1], latent_dim=32, max_latent_steps=500, enable_caption_condition=True, enable_speaker_condition=True, ref_min_frames=25, ref_max_frames=750); "
+        "vds = LatentTextDataset(sys.argv[2], latent_dim=32, max_latent_steps=500, enable_caption_condition=True, enable_speaker_condition=True, ref_min_frames=25, ref_max_frames=750); "
         "print('train_len=', len(ds), 'valid_len=', len(vds), 'speakers=', len(ds.manifest_index.speakers)); "
         "for i in range(min(5, len(ds))): s=ds[i]; assert s['latent'].ndim==2 and s['latent'].shape[1]==32 and s['num_frames']>0 and s['text']; "
         "print('sample[0]=', ds[0]['latent'].shape, ds[0]['ref_latent'].shape, repr(ds[0]['caption'][:40]))"
     )
-    return subprocess.run([str(VENV_PY), "-c", code], env=env).returncode
+    return subprocess.run([str(VENV_PY), "-c", code, train_manifest, valid_manifest], env=env).returncode
 
 
 def cmd_train(args: argparse.Namespace) -> int:
-    TRAIN_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    tok_link = TRAIN_OUTPUT_DIR / "tokenizer"
+    dataset_dir, output_dir = _variant_paths(args.variant)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    tok_link = output_dir / "tokenizer"
     if not tok_link.exists() and not tok_link.is_symlink():
         tok_link.symlink_to(TOKENIZER_SRC)
 
@@ -166,9 +226,9 @@ def cmd_train(args: argparse.Namespace) -> int:
         "--config",
         str(TRAIN_CONFIG),
         "--manifest",
-        str(TRAIN_MANIFEST),
+        str(dataset_dir / "train_manifest.jsonl"),
         "--output-dir",
-        str(TRAIN_OUTPUT_DIR),
+        str(output_dir),
     ]
     if args.resume:
         cmd += ["--resume", str(args.resume)]
@@ -178,16 +238,18 @@ def cmd_train(args: argparse.Namespace) -> int:
 
 
 def cmd_convert_best(args: argparse.Namespace) -> int:
+    _, output_dir = _variant_paths(args.variant)
     in_path = Path(args.input).resolve()
-    out_dir_resolved = TRAIN_OUTPUT_DIR.resolve()
+    out_dir_resolved = output_dir.resolve()
     if os.path.commonpath([str(in_path), str(out_dir_resolved)]) != str(out_dir_resolved):
-        raise ValueError(f"--input must be inside {TRAIN_OUTPUT_DIR}: got {in_path}")
+        raise ValueError(f"--input must be inside {output_dir}: got {in_path}")
     if not in_path.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {in_path}")
 
-    out_path = Path(args.output).resolve()
+    out_target = Path(args.output) if args.output else (output_dir / "model_best.safetensors")
+    out_path = out_target.resolve()
     if os.path.commonpath([str(out_path), str(out_dir_resolved)]) != str(out_dir_resolved):
-        raise ValueError(f"--output must be inside {TRAIN_OUTPUT_DIR}: got {out_path}")
+        raise ValueError(f"--output must be inside {output_dir}: got {out_path}")
 
     env = os.environ.copy()
     env["HF_HUB_OFFLINE"] = "1"
@@ -212,6 +274,8 @@ def cmd_eval(args: argparse.Namespace) -> int:
     cmd = [str(VENV_PY), str(eval_py)]
     if args.checkpoint:
         cmd += ["--checkpoint", str(args.checkpoint)]
+    for cp in args.extra_checkpoint:
+        cmd += ["--extra-checkpoint", str(cp)]
     if args.out_dir:
         cmd += ["--out-dir", str(args.out_dir)]
     if args.port:
@@ -228,21 +292,29 @@ def main() -> int:
     p_p1 = sub.add_parser("prepare-p1", help="Prepare pending Wave A-P1+P2 character batches")
     p_p1.add_argument("--workers", type=int, default=12)
 
+    p_wh = sub.add_parser("whisper-p1", help="Pre-run local Whisper on prepared character batches and stash cache")
+    p_wh.add_argument("--no-stash", action="store_true", help="Skip stashing whisper_text after transcription")
+
     p_lat = sub.add_parser("extract-latents", help="Extract shared DACVAE latents into shared_latents/")
+    p_lat.add_argument("--variant", choices=["lite", "full"], default="full")
     p_lat.add_argument("--workers", type=int, default=12)
     p_lat.add_argument("--limit", type=int, default=None)
 
-    sub.add_parser("verify-manifest", help="Verify LatentTextDataset loads sc29_v1 manifests")
+    p_vm = sub.add_parser("verify-manifest", help="Verify LatentTextDataset loads manifest")
+    p_vm.add_argument("--variant", choices=["lite", "full"], default="full")
 
     p_trn = sub.add_parser("train", help="Run 29-character Full FT training")
+    p_trn.add_argument("--variant", choices=["lite", "full"], default="full")
     p_trn.add_argument("--resume", default=None)
 
-    p_cvt = sub.add_parser("convert-best", help="Convert best .pt checkpoint inside outputs/sc29_v1_full/ to safetensors")
+    p_cvt = sub.add_parser("convert-best", help="Convert best .pt checkpoint inside variant output dir to safetensors")
+    p_cvt.add_argument("--variant", choices=["lite", "full"], default="full")
     p_cvt.add_argument("--input", required=True)
-    p_cvt.add_argument("--output", default=str(TRAIN_OUTPUT_DIR / "model_best.safetensors"))
+    p_cvt.add_argument("--output", default=None)
 
     p_ev = sub.add_parser("eval", help="Run multi-character and Fuyuko dual-persona evaluation")
     p_ev.add_argument("--checkpoint", default=None)
+    p_ev.add_argument("--extra-checkpoint", action="append", default=[])
     p_ev.add_argument("--out-dir", default=None)
     p_ev.add_argument("--port", type=int, default=None)
 
@@ -250,6 +322,7 @@ def main() -> int:
     dispatch = {
         "check": cmd_check,
         "prepare-p1": cmd_prepare_p1,
+        "whisper-p1": cmd_whisper_p1,
         "extract-latents": cmd_extract_latents,
         "verify-manifest": cmd_verify_manifest,
         "train": cmd_train,
