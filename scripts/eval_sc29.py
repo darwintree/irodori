@@ -961,6 +961,7 @@ def main() -> int:
     parser.add_argument("--whisper-python", type=Path, default=DEFAULT_WHISPER_PY)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--serve-only", action="store_true", help="Serve existing out-dir HTML report without running synthesis/ASR")
     parser.add_argument("--dry-run", action="store_true", help="Validate refs, prompts, and checkpoints without GPU")
     parser.add_argument("--whisper-worker-in", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--whisper-worker-out", type=Path, default=None, help=argparse.SUPPRESS)
@@ -968,6 +969,15 @@ def main() -> int:
 
     if args.whisper_worker_in is not None and args.whisper_worker_out is not None:
         return run_whisper_worker_main(args.whisper_worker_in, args.whisper_worker_out)
+
+    if args.serve_only:
+        if args.port is None:
+            raise ValueError("--serve-only requires --port")
+        index_html = args.out_dir / "index.html"
+        if not index_html.is_file():
+            raise FileNotFoundError(f"Missing evaluation report to serve: {index_html}")
+        serve_directory(args.out_dir, int(args.port))
+        return 0
 
     specs = resolve_model_specs(args)
     prompts = build_prompt_suite()

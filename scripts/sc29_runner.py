@@ -318,6 +318,8 @@ def cmd_eval(args: argparse.Namespace) -> int:
         cmd += ["--out-dir", str(args.out_dir)]
     if args.port:
         cmd += ["--port", str(args.port)]
+    if args.serve_only:
+        cmd.append("--serve-only")
     return subprocess.run(cmd, env=env).returncode
 
 
@@ -358,6 +360,7 @@ def main() -> int:
     p_ev.add_argument("--extra-checkpoint", action="append", default=[])
     p_ev.add_argument("--out-dir", default=None)
     p_ev.add_argument("--port", type=int, default=None)
+    p_ev.add_argument("--serve-only", action="store_true")
 
     args = parser.parse_args()
     dispatch = {
